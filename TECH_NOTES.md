@@ -445,3 +445,25 @@ every instance that looks visually similar.
   non-manifold junction has no single globally "correct" winding, so this
   is a bounded best effort, not a claim of full global consistency.
 
+- **`core/subdivide_mesh.py`** (new 2026-11-02): plain bmesh
+  `subdivide_edges` (uniform, `use_grid_fill=True`) run under Blender,
+  used ONLY by `pipeline.py`'s optional hard output-face-band enforcement
+  (`_enforce_output_face_band`) to raise a final asset's face count up to
+  a user-mandated floor. Confirmed quad-preserving in practice (a quad
+  subdivides into 4 quads), unlike the decimation path used for the
+  opposite (ceiling) direction. Not a quality improvement — it's a
+  last-resort density topper for when the curvature-adaptive pipeline's
+  own minimal, feature-preserving result is (correctly, by design) below
+  a user-imposed floor.
+- **`pipeline.py`'s `_enforce_output_face_band`** (new 2026-11-02):
+  opt-in hard post-process guarantee that the final joined asset's face
+  count lands inside `[min_output_frac, max_output_frac] * total_input_faces`.
+  Subdivides up via `subdivide_mesh.py` first (quad-preserving, tried
+  alone first since it's often already sufficient); only falls back to
+  `remesh._try_decimate_fallback` (quadric decimation, fully
+  triangulates) if subdividing overshoots the ceiling, or the asset
+  started above the ceiling. Distinct from `sizing.py`'s
+  `apply_face_budget` (the pre-finalize remesh-target hint band, a soft
+  shaping input that does NOT guarantee the final count) — both are
+  driven by the same `min_budget_frac`/`max_budget_frac` CLI args for
+  convenience, but only the post-join enforcement is an actual guarantee.

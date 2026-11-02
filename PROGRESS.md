@@ -498,3 +498,56 @@ decimation_fallback + instant_meshes), 31,746 faces / 31,650 verts /
 from the pre-fix baseline except winding, confirming `fix_winding` is a
 pure addition with no side effects on the rest of the pipeline's output.
 
+## Optional hard output-face-count band (0.5%-3% of input faces), user-requested 2026-11-02
+
+User explicitly requested a hard constraint: "nothing less or more, this
+is set" — the FINAL output face count must land inside
+`[min_frac, max_frac] * total_input_faces` (0.5%-3% as the concrete
+numbers given), no exceptions. This is opt-in (`None`/`None` by default,
+unchanged pipeline behavior) — added because of a direct user instruction,
+not a change to this project's own Primary objective (minimal faces for
+zero feature loss, no fixed budget by default).
+
+Two separate mechanisms, both wired through `pipeline.py`'s
+`min_budget_frac`/`max_budget_frac` CLI args:
+1. **Soft pre-finalize hint band** (`sizing.py`'s `apply_face_budget`,
+   built first): scales the curvature-integrated remesh target hint per
+   component into a band, proportionally, preserving relative
+   curvature-driven distribution. This only shapes the remesh STARTING
+   point — finalize's dissolve/darts/coplanar_merge stages still simplify
+   further afterward, so this alone does NOT guarantee the final count
+   lands in the band (confirmed: testsample1 with a 3% ceiling on the
+   remesh hint still finalized down to 1,000 faces, same as unconstrained).
+2. **Hard post-process output clamp** (`pipeline.py`'s
+   `_enforce_output_face_band`, the actual guarantee): runs after the
+   join stage, checks the REAL final joined asset's face count, and only
+   if it's outside the band:
+   - **Under the floor** (the common case — every real asset tested this
+     session naturally finalizes to well under 1% of input faces, since
+     that's the curvature-adaptive minimum): `subdivide_mesh.py` (new
+     file) runs plain bmesh `subdivide_edges` passes (quad-preserving:
+     confirmed directly — testsample1 went from 50.8% quads to **68.5%
+     quads** after subdividing, since subdividing a quad cleanly yields 4
+     more quads) until the floor is reached. If that alone lands inside
+     the band (true on every asset tested), nothing else happens — no
+     triangulation, no decimation.
+   - **Over the ceiling** (only reached if subdividing overshoots past it,
+     or the asset started above the ceiling with no subdivision needed):
+     falls back to `remesh._try_decimate_fallback`'s quadric decimation,
+     targeting the geometric mean of floor/ceiling as a safe mid-band
+     landing spot. Honestly flagged in the stats
+     (`"triangulated": true`) — like every other decimation-fallback
+     component already in this pipeline, this fully triangulates the
+     result; there's no quad-aware exact-count-control tool in this
+     codebase, so exact final-count guarantees and quad purity trade off
+     against each other whenever the decimate path is actually taken.
+
+**Verified on testsample1_raw_860k.glb** (0.5%-3% band, floor=4,301,
+ceiling=25,807 faces): natural finalize result 1,000 faces (below floor)
+→ 2 subdivision passes → 11,860 faces (inside the band, no decimation
+needed) → quads_pct 68.53% (UP from 50.8% unconstrained), 0 non-manifold
+edges, winding still fully consistent (`trimesh.is_winding_consistent:
+True`) after subdividing. Saved to
+`outputs/testsample1_raw_860k_band0.5to3pct/`.
+
+Usage: `python3 pipeline.py <input> <out_dir> 0.005 0.03`.
