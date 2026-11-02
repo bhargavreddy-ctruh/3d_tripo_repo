@@ -581,3 +581,34 @@ args), all 0 remesh/finalize failures:
 All four real-asset tests (testsample1, rack, koala, image18) confirm the
 hard output-band guarantee holds, and subdivision-only (no triangulation)
 was sufficient in every case tested so far.
+
+## Real bug fixed: subdivision for the output floor looked blocky, not smooth
+
+Found 2026-11-02 via a user-shared wireframe screenshot of the koala
+output: `subdivide_mesh.py`'s original approach, plain
+`bmesh.ops.subdivide_edges` (linear cuts), only chops each EXISTING
+coarse face into finer sub-faces along perfectly straight lines. It has
+no notion of the true curved surface, so it just echoes the coarse
+mesh's own flat facets at a finer grid -- more polygons, same blocky
+silhouette. Confirmed directly by rendering before/after with an honest
+(non-triangulating, filled-polygon) renderer: the "fixed" output looked
+just as chunky as the original low-poly mesh, just denser.
+
+**Fix**: `subdivide_mesh.py` now uses a Catmull-Clark `SUBSURF` modifier
+(applied and baked) instead of linear edge subdivision. Catmull-Clark
+pulls the surface toward a smooth limit surface at each level rather than
+just cutting existing flat facets -- confirmed via the same honest
+renderer to produce a visibly rounder, smoother result. It also always
+outputs pure quads regardless of the input mix (quads/tris/n-gons),
+which is a further quad% win: the full koala pipeline re-run after this
+fix landed at **100% quads** (up from 68.67% with the old linear
+approach), 13,945 faces (inside the 8,954-53,723 band), 0 non-manifold
+edges, 0 remesh/finalize failures.
+
+**Also tried and REJECTED**: reprojecting the subdivided result back onto
+the original dense input via `reproject.py`'s existing SHRINKWRAP stage
+(to correct Catmull-Clark's natural smoothing-induced shrinkage). Tested
+directly and found it snaps the smooth limit surface back toward the raw
+scan's own small surface noise/bumps, visibly UNDOING the smoothing this
+fix exists to provide -- so reprojection is deliberately NOT run after
+this stage, even though it's used everywhere else in this pipeline.

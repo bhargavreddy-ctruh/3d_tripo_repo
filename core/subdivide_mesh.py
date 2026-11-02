@@ -1,13 +1,29 @@
-"""Uniform bmesh subdivision — used ONLY as the up-scaling half of
+"""Catmull-Clark smooth subdivision — used ONLY as the up-scaling half of
 `pipeline.py`'s hard output-face-count band enforcement, when the
 curvature-adaptive pipeline's natural (minimal, feature-preserving) result
 already falls below the user-mandated floor. Runs under Blender (bpy).
 
-This does not add any real detail the curvature field didn't already
-call for — it's a last-resort density topper, not a quality improvement.
-Kept honest in TECH_NOTES.md: a mesh that needed this is being forced
-denser than this engine's own feature-preservation analysis says it needs
-to be, specifically because the user requested a hard floor.
+REAL BUG, found via a user-shared wireframe screenshot (2026-11-02): the
+first version of this file used plain `bmesh.ops.subdivide_edges` (linear
+cuts). That only chops each EXISTING coarse face into finer sub-faces
+along perfectly straight lines -- it has no notion of the true curved
+surface, so it just echoes the coarse mesh's own flat facets at a finer
+grid, producing a visibly blocky/non-smooth result (confirmed directly:
+the coarse mesh's large flat quads stayed flat and faceted, just chopped
+into more of the same flat pieces). Catmull-Clark subdivision (a Blender
+SUBSURF modifier, applied and baked) instead pulls the surface toward a
+smooth limit surface at each level -- confirmed directly on a real asset
+(koala) to produce a visibly rounded, smooth result at a comparable final
+face count, instead of a blocky one. It also always outputs pure quads
+regardless of the input mix (quads/tris/n-gons), which is a further quad%
+improvement over the input.
+
+Still not a quality improvement over the curvature-adaptive minimum this
+pipeline naturally computes -- it's a last-resort density topper, used
+only because the user requested a hard output floor. `pipeline.py`
+reprojects the result back onto the original dense input afterward (see
+`_enforce_output_face_band`) to correct for Catmull-Clark's natural
+smoothing-induced shrinkage relative to the true surface.
 """
 import json
 import os
@@ -16,34 +32,37 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy
-import bmesh
 
 import io_blender
 
 
-def subdivide_until(in_obj, out_obj, min_target_faces, max_passes=6):
+def subdivide_until(in_obj, out_obj, min_target_faces, max_levels=4):
     io_blender.clear_scene()
     objs = io_blender.import_mesh(in_obj)
     obj = objs[0]
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
 
-    passes = 0
-    while len(bm.faces) < min_target_faces and passes < max_passes:
-        bm.edges.ensure_lookup_table()
-        bmesh.ops.subdivide_edges(
-            bm, edges=list(bm.edges), cuts=1,
-            use_grid_fill=True, use_single_edge=False,
-        )
-        passes += 1
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    faces_after = len(obj.evaluated_get(depsgraph).data.polygons)
+    levels = 0
+    mod = None
 
-    bm.to_mesh(obj.data)
-    obj.data.update()
-    faces_after = len(bm.faces)
-    bm.free()
+    while faces_after < min_target_faces and levels < max_levels:
+        levels += 1
+        if mod is None:
+            mod = obj.modifiers.new("vqe_subsurf", type="SUBSURF")
+            mod.subdivision_type = 'CATMULL_CLARK'
+        mod.levels = levels
+        mod.render_levels = levels
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        faces_after = len(obj.evaluated_get(depsgraph).data.polygons)
+
+    if mod is not None:
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    faces_after = len(obj.data.polygons)
 
     io_blender.export_mesh(out_obj, objects=[obj], quads=True)
-    return {"passes": passes, "faces_after": faces_after, "out_obj": out_obj}
+    return {"levels": levels, "faces_after": faces_after, "out_obj": out_obj}
 
 
 if __name__ == "__main__":

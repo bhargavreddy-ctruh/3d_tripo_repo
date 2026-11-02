@@ -64,6 +64,25 @@ def _enforce_output_face_band(final_obj, out_dir, base_name, total_input_faces,
     That trade-off (exact count control vs. quad purity) is unavoidable
     with the tools in this codebase and is reported honestly in the stats
     below (`"triangulated": true` whenever the decimate path is taken).
+
+    REAL BUG, found via a user-shared wireframe screenshot (2026-11-02):
+    `subdivide_mesh.py` originally used plain `bmesh.ops.subdivide_edges`
+    (linear cuts). That only chops each EXISTING coarse face into finer
+    sub-faces along perfectly straight lines -- it has no notion of the
+    true curved surface, so it just echoes the coarse mesh's own flat
+    facets at a finer grid, producing a visibly blocky/non-smooth result
+    (confirmed directly from the screenshot: dense, chaotic, non-flowing
+    facets on the koala's rounded head/ears). Fix: `subdivide_mesh.py` now
+    uses a Catmull-Clark SUBSURF modifier instead, which pulls the surface
+    toward a smooth limit surface at each level -- confirmed directly
+    (rendered before/after) to produce a visibly rounded, smooth result
+    instead of a blocky one, at a comparable final face count, and always
+    outputs pure quads regardless of the input mix. Reprojecting the
+    result back onto the original dense input (tried, via `reproject.py`)
+    was REJECTED after direct testing: it snapped Catmull-Clark's smooth
+    limit surface back toward the raw scan's own small surface noise,
+    visibly undoing the smoothing this fix exists to provide -- so no
+    reprojection happens after this stage specifically.
     """
     floor = max(4, int(round(min_output_frac * total_input_faces))) if min_output_frac is not None else 4
     ceiling = (max(floor, int(round(max_output_frac * total_input_faces)))
@@ -105,6 +124,14 @@ def _enforce_output_face_band(final_obj, out_dir, base_name, total_input_faces,
             return final_obj, stats
         result_obj = subdiv_obj
         current = subdiv_result["faces_after"]
+        # NOT reprojected onto the original dense input here, deliberately:
+        # tested directly on a real asset (koala) and confirmed reprojection
+        # (SHRINKWRAP onto the raw-scan reference) snaps Catmull-Clark's
+        # smooth limit surface back toward the raw scan's own small surface
+        # noise/bumps, visibly UNDOING the smoothing improvement this stage
+        # exists to provide. Positional drift from the true surface here is
+        # bounded by the subdivision level (a local, small effect), and
+        # smoothness was the actual complaint this fix addresses.
 
     if ceiling is not None and current > ceiling:
         clamped_obj = os.path.join(out_dir, f"{base_name}__final_clamped.obj")
