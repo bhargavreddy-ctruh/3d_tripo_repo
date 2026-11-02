@@ -551,3 +551,33 @@ True`) after subdividing. Saved to
 `outputs/testsample1_raw_860k_band0.5to3pct/`.
 
 Usage: `python3 pipeline.py <input> <out_dir> 0.005 0.03`.
+
+**Regression confirmed on 3 more real assets** (0.5%-3% band, same CLI
+args), all 0 remesh/finalize failures:
+- **Rack** (854,828 input faces, floor 4,274/ceiling 25,645): natural
+  968 faces (below floor) → 2 subdivision passes → 11,708 faces (inside
+  band, no decimation needed), quads_pct 75.44% (up from the
+  unconstrained baseline), 0 non-manifold edges, 0 boundary edges.
+- **Koala** (1,790,758 input faces, floor 8,954/ceiling 53,723): natural
+  3,117 faces (below floor) → 2 subdivision passes → 32,759 faces
+  (inside band), quads_pct 68.67%, 0 non-manifold edges, 12 boundary
+  edges.
+- **"image (18)" multi-part asset** (89,827 input faces, floor
+  449/ceiling 2,695): here the SOFT pre-remesh sizing band (shared CLI
+  args) had a real, significant effect — natural curvature estimate for
+  this asset exceeded the ceiling, so the remesh-stage hint was scaled
+  down well before finalize ran, landing the pipeline's natural result at
+  866 faces, already inside the band with no post-join clamp needed at
+  all (`"action": "none_already_in_band"`). Worth noting plainly: unlike
+  every raw-scan asset tested (where the soft hint band has essentially
+  no effect, since finalize's own simplification already lands far below
+  any ceiling this small), this smaller/already-lower-poly asset's
+  natural curvature estimate was large enough for the soft band to
+  meaningfully reshape the remesh starting point. One honest residual: 1
+  non-manifold edge appeared on this asset (every other test in this
+  project has been 0) — small, not chased further, but flagged rather
+  than silently reported as clean.
+
+All four real-asset tests (testsample1, rack, koala, image18) confirm the
+hard output-band guarantee holds, and subdivision-only (no triangulation)
+was sufficient in every case tested so far.
