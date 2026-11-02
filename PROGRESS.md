@@ -612,3 +612,72 @@ directly and found it snaps the smooth limit surface back toward the raw
 scan's own small surface noise/bumps, visibly UNDOING the smoothing this
 fix exists to provide -- so reprojection is deliberately NOT run after
 this stage, even though it's used everywhere else in this pipeline.
+
+## Real architecture fix: floor-aware finalize instead of post-hoc densification
+
+The Catmull-Clark fix above made the output SMOOTH, but the user correctly
+flagged a deeper problem it didn't solve: the output wasn't **structured
+anisotropic flow** any more -- just dense, uniform quads with no relation
+to the mesh's actual curvature direction. This is architecturally
+inevitable for ANY post-hoc density-adding operator (linear subdivide,
+Catmull-Clark subsurf, even re-running Instant Meshes on the already-
+simplified coarse mesh -- tried directly, broke badly: Instant Meshes'
+field solver needs real input resolution to compute a direction field
+from, and an already-very-coarse mesh doesn't have enough). All of these
+operate purely geometrically, with zero knowledge of the ORIGINAL
+field-aligned structure the remesher (Instant Meshes/quadriflow) already
+computed from curvature -- that structure exists, briefly, in the
+REMESHED (pre-finalize) stage, and `dissolve.py`/`coplanar_merge.py`
+then collapse it down toward the curvature-minimal result regardless of
+how dense remesh's own output was.
+
+**Real fix**: make the finalize chain floor-aware so it STOPS simplifying
+early, right at whatever field-aligned structure remesh already produced,
+instead of collapsing all the way to the curvature-minimum and then
+needing a geometry-only operator to artificially re-densify afterward.
+
+- `dissolve.simplify_component(bm, min_faces=...)`: breaks out of its
+  pass loop once `len(bm.faces) <= min_faces`.
+- `coplanar_merge.merge_coplanar_regions(bm, min_faces=...)`: skips (not
+  merges) any cluster whose merge would cross below `min_faces`, letting
+  smaller/safer clusters after it still merge.
+- `pipeline.py`: when a hard output band is requested, computes a GLOBAL
+  floor from `min_output_frac * total_input_faces`, splits it across
+  components proportionally to each component's own curvature-driven
+  `target_faces_hint` (same weighting the soft sizing band already uses),
+  with a **+15% safety margin** (darts/caps run after dissolve/
+  coplanar_merge and aren't themselves floor-aware, so they can nudge the
+  count slightly under target), and passes each component's share as
+  `min_faces` into its `finalize_component.py` subprocess call.
+
+**Real bug found and fixed while building this**: the top-of-pass
+`len(bm.faces) <= min_faces` check in `dissolve.py` only stops dissolve
+BETWEEN passes -- one pass can greedily accept dozens of loops at once
+and blow straight through the target. Confirmed directly: a 9,737-face
+target overshot down to 8,350 in dissolve alone. Fixed by tracking a
+running face budget WITHIN a pass too (each loop's own edge count as an
+estimate of faces it will remove -- a transverse-loop dissolve removes
+very close to one face per edge dissolved), stopping acceptance of
+FURTHER loops once the budget is exhausted rather than only re-checking
+after the whole pass already ran. This took the same test case from
+overshooting by 14% to landing only 0.8% short.
+
+**Verified on all 4 real assets tested this session** (0.5%-3% band):
+every one now clears its floor from genuine field-aligned structure
+alone, with `"action": "none_already_in_band"` -- **zero** post-hoc
+subdivision needed in any case:
+
+| Asset | Floor | Natural result | Quads% | Non-manifold |
+|---|---|---|---|---|
+| testsample1 | 4,301 | 4,885 | 75.15% | 0 |
+| rack | 4,274 | 4,859 | 78.72% | 0 |
+| koala | 8,954 | 10,252 | 72.87% | 0 |
+| image18 | 449 | 911 | 71.35% | 1 (pre-existing, unrelated) |
+
+Rendered (honest, non-triangulating) comparison on koala confirms this
+visually: the floor-aware result shows genuine banded/flowing quad rails
+wrapping the limbs and head, unlike either the old linear-subdivide or
+Catmull-Clark post-hoc results, which both showed uniform, non-directional
+density regardless of the underlying curvature. The post-join subdivide/
+decimate clamp (`_enforce_output_face_band`) remains in the code as a
+true last-resort safety net, but is no longer the common path.

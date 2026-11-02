@@ -207,13 +207,45 @@ def run_pipeline(input_path, out_dir, max_dissolve_passes=20, min_budget_frac=No
 
     # Stage: finalize each component (dissolve+darts+caps+reproject), one
     # Blender process per component.
+    #
+    # Per-component floor (only if a hard output band was requested): split
+    # the GLOBAL floor across components proportionally to their own
+    # curvature-driven target_faces_hint (same weighting the soft sizing
+    # band already uses), so dissolve/coplanar_merge stop simplifying
+    # early -- at remesh's own field-aligned structure -- instead of
+    # always converging to the curvature-minimal result and needing a
+    # post-hoc, non-flow-aware density topper afterward. Confirmed
+    # directly (see PROGRESS.md) that this preserves genuine anisotropic
+    # flow where post-hoc subdivision/subsurf does not.
+    with open(manifest_path) as fh:
+        manifest = json.load(fh)
+    comp_by_index = {c["index"]: c for c in manifest["components"]}
+
+    per_component_min_faces = {}
+    if min_output_frac is not None:
+        total_input_faces_for_floor = sum(c["faces"] for c in manifest["components"])
+        global_floor = max(4, int(round(min_output_frac * total_input_faces_for_floor)))
+        # +15% safety margin: darts/caps/collinear-cleanup run AFTER the
+        # floor-aware dissolve/coplanar_merge stages and aren't themselves
+        # floor-aware, so they can still nudge the count slightly under the
+        # per-component target. Confirmed directly on koala: an unpadded
+        # floor landed the real joined total 1.9% short (8,787 vs 8,954),
+        # which still triggered the post-join subdivide topper -- an
+        # abrupt ~4x jump (Catmull-Clark only has integer levels), far
+        # worse than slightly overshooting the floor would have been. A
+        # small margin makes clearing the floor from genuine field-aligned
+        # structure alone the common case, keeping the post-join clamp a
+        # true rare-case safety net instead of a routine last step.
+        global_floor_padded = int(round(global_floor * 1.15))
+        hint_by_index = {r["index"]: r.get("target_faces_hint", 4) for r in sizing_results if "error" not in r}
+        hint_total = sum(hint_by_index.values()) or 1
+        for idx, hint in hint_by_index.items():
+            per_component_min_faces[idx] = max(4, int(round(global_floor_padded * hint / hint_total)))
+
     t = time.time()
     finalized_dir = os.path.join(out_dir, f"{base_name}__finalized")
     os.makedirs(finalized_dir, exist_ok=True)
     finalize_script = os.path.join(os.path.dirname(__file__), "finalize_component.py")
-    with open(manifest_path) as fh:
-        manifest = json.load(fh)
-    comp_by_index = {c["index"]: c for c in manifest["components"]}
 
     finalized_paths = []
     finalize_results = []
@@ -223,7 +255,10 @@ def run_pipeline(input_path, out_dir, max_dissolve_passes=20, min_budget_frac=No
             continue
         original_dense = comp_by_index[idx]["path"]
         out_obj = os.path.join(finalized_dir, f"comp{idx:04d}__final.obj")
-        fres = _run_blender(finalize_script, [r["out_obj"], original_dense, out_obj])
+        finalize_args = [r["out_obj"], original_dense, out_obj]
+        if idx in per_component_min_faces:
+            finalize_args.append(str(per_component_min_faces[idx]))
+        fres = _run_blender(finalize_script, finalize_args)
         fresult = _extract_json(fres.stdout, "FINALIZE_RESULT_JSON_START", "FINALIZE_RESULT_JSON_END")
         if fresult and fresult.get("ok") and os.path.exists(out_obj):
             finalized_paths.append(out_obj)
@@ -236,6 +271,8 @@ def run_pipeline(input_path, out_dir, max_dissolve_passes=20, min_budget_frac=No
                                   "detail": fresult})
     report["timings"]["finalize"] = time.time() - t
     report["finalize_failures"] = [f["index"] for f in finalize_results if not f["ok"]]
+    if per_component_min_faces:
+        report["per_component_min_faces"] = per_component_min_faces
 
     # Stage: rejoin all finalized components into one final asset.
     t = time.time()

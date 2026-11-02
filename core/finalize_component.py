@@ -30,13 +30,19 @@ import reproject
 import fix_winding
 
 
-def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
+def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20, min_faces=None):
     """Each stage is independently fault-isolated: a failure in dissolve,
     darts, or caps rolls that one stage back (re-reads the mesh as it stood
     before that stage) and continues with the rest, rather than discarding
     all prior work for the component. Safe degradation over total failure,
     per the Primary objective — a component that only gets dissolve+darts
     (caps failing) is still a correct, useful result.
+
+    `min_faces`: optional per-component floor, threaded into `dissolve`
+    and `coplanar_merge` so they stop simplifying early once reached
+    instead of always converging fully -- see their own `min_faces`
+    docstrings. Exists only for the user-requested hard output-face-count
+    band; `None` (default) is this project's normal unbounded behavior.
     """
     io_blender.clear_scene()
     objs = io_blender.import_mesh(remeshed_obj)
@@ -48,7 +54,7 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
 
     dissolve_stats = None
     try:
-        dissolve_stats = dissolve.simplify_component(bm, max_passes=max_passes)
+        dissolve_stats = dissolve.simplify_component(bm, max_passes=max_passes, min_faces=min_faces)
     except Exception as e:
         stage_errors["dissolve"] = str(e)
         bm.free()
@@ -64,7 +70,7 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
     coplanar_merge_stats = None
     try:
         bm.edges.ensure_lookup_table()
-        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(bm)
+        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(bm, min_faces=min_faces)
     except Exception as e:
         stage_errors["coplanar_merge"] = str(e)
 
@@ -155,10 +161,11 @@ if __name__ == "__main__":
     argv = sys.argv
     args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
     if len(args) < 3:
-        print("Usage: blender --background --python finalize_component.py -- <remeshed.obj> <original_dense.obj> <out.obj>")
+        print("Usage: blender --background --python finalize_component.py -- <remeshed.obj> <original_dense.obj> <out.obj> [min_faces]")
         sys.exit(1)
+    min_faces = int(args[3]) if len(args) > 3 else None
     try:
-        result = finalize(args[0], args[1], args[2])
+        result = finalize(args[0], args[1], args[2], min_faces=min_faces)
         result["ok"] = True
     except Exception as e:
         result = {"ok": False, "error": str(e), "out_obj": args[2]}

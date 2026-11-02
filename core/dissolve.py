@@ -123,8 +123,19 @@ def trace_full_transverse_loop(start_edge, cost_map, protected_set):
 
 
 def simplify_component(bm, max_passes=20, hard_fail_area_drift=5.0,
-                        warn_area_drift=0.02):
+                        warn_area_drift=0.02, min_faces=None):
     """Multi-pass dissolve. Returns stats dict. Mutates bm in place.
+
+    `min_faces`: optional floor -- stops dissolving (without raising) once
+    `len(bm.faces) <= min_faces`, rather than always running to full
+    convergence. Exists only for the user-requested hard output-face-count
+    band: letting dissolve stop EARLY, at whatever field-aligned structure
+    remesh already produced, keeps the natural anisotropic flow the
+    pipeline is built around -- unlike post-hoc isotropic subdivision
+    (`subdivide_mesh.py`), which was found to destroy that structure
+    entirely (confirmed via a user-shared screenshot showing uniformly
+    dense, non-flowing quads). `None` (default) is this project's normal
+    behavior: dissolve always runs to full convergence, no floor.
 
     Area-drift handling (see _total_area_triangulated's docstring): dissolve
     never moves a vertex, so the ONE mathematically exact, planarity-
@@ -146,6 +157,8 @@ def simplify_component(bm, max_passes=20, hard_fail_area_drift=5.0,
     max_drift_seen = 0.0
 
     for pass_idx in range(max_passes):
+        if min_faces is not None and len(bm.faces) <= min_faces:
+            break
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
         cost_map, protected_set, _ = protect_mod.compute_edge_costs(bm)
 
@@ -186,7 +199,22 @@ def simplify_component(bm, max_passes=20, hard_fail_area_drift=5.0,
         loops.sort(key=avg_cost)
         used_faces = set()
         accepted = []
+        # BUG FIX, found via a user-requested hard output-floor feature
+        # (2026-11-02): the top-of-loop `len(bm.faces) <= min_faces` check
+        # only stops dissolve BETWEEN passes, but one pass can greedily
+        # accept dozens of loops at once -- confirmed directly, a single
+        # pass blew straight through a 9,737-face target down to 8,350,
+        # overshooting by more than the margin padding added to compensate.
+        # Fix: track a running face budget WITHIN the pass too, using each
+        # loop's own edge count as the (slightly approximate, but good
+        # enough -- a transverse loop dissolve removes very close to one
+        # face per edge dissolved) estimate of faces it will remove, and
+        # stop accepting MORE loops once the budget is exhausted, rather
+        # than only checking again after the whole pass already ran.
+        faces_budget = (len(bm.faces) - min_faces) if min_faces is not None else None
         for loop in loops:
+            if faces_budget is not None and faces_budget <= 0:
+                break
             faces = set()
             for e in loop:
                 faces.update(f.index for f in e.link_faces)
@@ -194,6 +222,8 @@ def simplify_component(bm, max_passes=20, hard_fail_area_drift=5.0,
                 continue
             used_faces |= faces
             accepted.append(loop)
+            if faces_budget is not None:
+                faces_budget -= len(loop)
 
         if not accepted:
             break

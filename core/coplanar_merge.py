@@ -205,8 +205,19 @@ def dissolve_collinear_vertices(bm, angle_tol_deg=1.0):
 
 
 def merge_coplanar_regions(bm, angle_tol_deg=2.0, collapse_collinear=False,
-                            collinear_angle_tol_deg=1.0):
-    """Mutates bm in place. Returns stats dict."""
+                            collinear_angle_tol_deg=1.0, min_faces=None):
+    """Mutates bm in place. Returns stats dict.
+
+    `min_faces`: optional floor -- skips a cluster's merge (rather than
+    dissolving it) once `len(bm.faces)` has dropped to or below this
+    count, so merging stops early instead of always converging fully.
+    Smaller clusters later in the loop can still merge if they wouldn't
+    themselves cross the floor. Exists only for the user-requested hard
+    output-face-count band -- see `dissolve.simplify_component`'s
+    `min_faces` docstring for why stopping early (at remesh's own
+    field-aligned structure) beats post-hoc isotropic subdivision.
+    `None` (default): unchanged behavior, merges every safe cluster.
+    """
     t0 = time.perf_counter()
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     t_normals = time.perf_counter()
@@ -226,9 +237,13 @@ def merge_coplanar_regions(bm, angle_tol_deg=2.0, collapse_collinear=False,
     n_merged = 0
     n_skipped_exception = 0
     n_skipped_non_disk = 0
+    n_skipped_min_faces = 0
     for _ci, cluster in enumerate(multi_face_clusters):
         valid_faces = [f for f in cluster if f.is_valid]
         if len(valid_faces) < 2:
+            continue
+        if min_faces is not None and len(bm.faces) - (len(valid_faces) - 1) < min_faces:
+            n_skipped_min_faces += 1
             continue
         if not _is_disk_topology(valid_faces):
             # An annulus/multiply-connected/branching cluster would create a
@@ -282,6 +297,7 @@ def merge_coplanar_regions(bm, angle_tol_deg=2.0, collapse_collinear=False,
         "clusters_merged": n_merged,
         "clusters_skipped_non_disk": n_skipped_non_disk,
         "clusters_skipped_exception": n_skipped_exception,
+        "clusters_skipped_min_faces": n_skipped_min_faces,
         "collinear_verts_removed": n_collinear_removed,
         "faces_before": n_faces_before,
         "faces_after": len(bm.faces),
