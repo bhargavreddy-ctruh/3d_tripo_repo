@@ -44,6 +44,11 @@ def _quad_corner_angles(mesh, quad_verts):
 
 def merge_coplanar_triangle_pairs(mesh, angle_face_deg=config.COPLANAR_DART_DEG,
                                    angle_shape_deg=90.0):
+    # Fix winding once (input may come straight from dissolve.py, already
+    # consistent, or from an external remesher via finalize_component.py,
+    # which isn't guaranteed to be) — recalc_face_normals() itself is just
+    # a per-face Newell computation, not a winding fix (see its docstring).
+    mesh.fix_winding_consistency()
     mesh.recalc_face_normals()
     angle_face_rad = math.radians(angle_face_deg)
     # Max allowed deviation of each quad corner angle from 90deg.

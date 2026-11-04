@@ -92,6 +92,11 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
                             collinear_angle_tol_deg=1.0):
     """Mutates mesh in place. Returns stats dict."""
     t0 = time.perf_counter()
+    # Fix winding once (recalc_face_normals() is just a per-face Newell
+    # computation now, not a winding fix — see its docstring); input here
+    # comes from darts.py, already consistent, but this stage is cheap
+    # insurance against any upstream inconsistency.
+    mesh.fix_winding_consistency()
     mesh.recalc_face_normals()
     t_normals = time.perf_counter()
 

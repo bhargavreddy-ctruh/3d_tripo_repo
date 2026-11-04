@@ -119,14 +119,33 @@ def simplify_component(mesh, max_passes=20, hard_fail_area_drift=5.0,
     (>hard_fail_area_drift) is treated as a real bug; anything between
     warn_area_drift and that ceiling is recorded in stats, not raised.
     """
+    # Fix winding ONCE up front (remesh output isn't guaranteed consistent)
+    # rather than every pass — merge_faces orients every new face to match
+    # an existing neighbor, so once the mesh is consistent it stays that
+    # way through every merge this loop makes; no need to re-fix it after
+    # every pass the way a full bmesh.ops.recalc_face_normals call would.
+    mesh.fix_winding_consistency()
+
+    # Compute the component's characteristic face-area scale ONCE, from the
+    # pre-dissolve mesh, instead of every pass: it's meant to represent
+    # "this component's own scale" (see protect.py), which the original
+    # full-mesh median already captures well before any faces merge, and
+    # recomputing a median over every face on every one of up to 20 passes
+    # was pure overhead with no real accuracy benefit.
+    initial_face_areas = [mesh.calc_area(f) for f in mesh.faces]
+    local_median_area = float(np.median(initial_face_areas)) if initial_face_areas else 0.0
+
     area_before = _total_area(mesh)
     total_dissolved = 0
     passes_run = 0
     max_drift_seen = 0.0
 
     for pass_idx in range(max_passes):
-        mesh.recalc_face_normals()
-        cost_map, protected_set, _ = protect_mod.compute_edge_costs(mesh)
+        # protect_mod.compute_edge_costs() already recalcs normals itself
+        # (needs them for the crease/dome-saddle tests); no need to do it
+        # twice here.
+        cost_map, protected_set, _ = protect_mod.compute_edge_costs(
+            mesh, local_median_area=local_median_area)
 
         # BUG FIX (found via real-asset testing, not the synthetic self-test
         # which never exercises a protected edge): cost_map has an entry for

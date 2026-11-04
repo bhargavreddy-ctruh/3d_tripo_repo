@@ -35,23 +35,35 @@ import io_mesh
 def compute_edge_costs(mesh, crease_deg=config.CREASE_DEG,
                         micro_curve_deg=config.MICRO_FEATURE_CURVE_DEG,
                         micro_area_frac=config.MICRO_FEATURE_AREA_FRAC,
-                        dome_saddle_deg=config.DOME_SADDLE_DEG):
+                        dome_saddle_deg=config.DOME_SADDLE_DEG,
+                        local_median_area=None):
     """Return {edge_id: cost} for every edge in mesh. cost == math.inf means
     hard-protected (never dissolve); lower finite cost = safer/cheaper to
     dissolve first.
+
+    local_median_area: pass a precomputed value (e.g. from the mesh's state
+    before a multi-pass dissolve loop started) to skip the O(faces) median
+    recompute on every call — dissolve.py's loop calls this every pass, and
+    the component's own characteristic scale doesn't need to track the
+    shrinking face count that precisely pass to pass. Leave None to compute
+    it fresh from the mesh's current faces (the previous, always-live
+    behavior).
     """
     crease_rad = math.radians(crease_deg)
     micro_curve_rad = math.radians(micro_curve_deg)
     dome_saddle_rad = math.radians(dome_saddle_deg)
 
-    # Remeshers (Instant Meshes especially) don't always emit consistent
-    # face winding, which makes every normal-angle-based test below (crease,
-    # dome/saddle, micro-feature) see false huge deviations on an otherwise
-    # flat region. Must recalc before any angle test.
+    # recalc_face_normals() here is a plain per-face Newell computation —
+    # NOT a winding fix (see its own docstring). Callers that loop many
+    # times over a mesh whose winding is already known-consistent (e.g.
+    # dissolve.py's pass loop, which fixes winding once up front and keeps
+    # it consistent via merge_faces) should rely on that, rather than this
+    # repeated call somehow re-correcting bad winding — it no longer does.
     mesh.recalc_face_normals()
 
-    face_areas = np.array([mesh.calc_area(f) for f in mesh.faces]) if list(mesh.faces) else np.array([0.0])
-    local_median_area = float(np.median(face_areas)) if len(face_areas) else 0.0
+    if local_median_area is None:
+        face_areas = np.array([mesh.calc_area(f) for f in mesh.faces]) if list(mesh.faces) else np.array([0.0])
+        local_median_area = float(np.median(face_areas)) if len(face_areas) else 0.0
 
     hard_protected = set()
     costs = {}

@@ -194,21 +194,26 @@ class EditMesh:
         return n / length
 
     def recalc_face_normals(self):
-        """Matches `bmesh.ops.recalc_face_normals`: this is NOT just "compute
-        each face's own Newell normal independently" — it ALSO fixes
-        winding CONSISTENCY across connected faces first. Remeshers (Instant
-        Meshes/quadriflow, and the quadric-decimation fallback) don't always
-        emit consistent face winding; two adjacent faces with opposite
-        winding have Newell normals pointing in near-opposite directions
-        even where the surface is locally flat, which makes every
-        normal-angle-based test downstream (protect.py's crease/dome-saddle
-        rules, coplanar_merge.py's flood fill) see false huge deviations on
-        an otherwise flat region. Confirmed directly: skipping the winding
-        fix here made protect.py hard-protect ~98% of a real decimated
-        component's edges instead of the correct ~73%, stalling dissolve
-        after a handful of passes instead of the many it should run.
-        """
-        self.fix_winding_consistency()
+        """Recompute every face's own Newell normal. Pure per-face math —
+        O(F) with no traversal — safe to call every pass of a dissolve-style
+        loop.
+
+        NOTE: this does NOT fix winding consistency (unlike
+        `bmesh.ops.recalc_face_normals`, which does both). Two adjacent
+        faces with opposite winding have Newell normals pointing in
+        near-opposite directions even where the surface is locally flat,
+        which makes every normal-angle-based test downstream (protect.py's
+        crease/dome-saddle rules, coplanar_merge.py's flood fill) see false
+        huge deviations on an otherwise flat region — confirmed directly:
+        on inconsistently-wound input, skipping a winding fix made
+        protect.py hard-protect ~98% of a real decimated component's edges
+        instead of the correct ~73%. Call `fix_winding_consistency()`
+        explicitly first (once, not per pass) whenever the mesh's winding
+        isn't already known-consistent — e.g. once at the start of each
+        finalize stage, since remesh output isn't guaranteed consistent and
+        `merge_faces` only guarantees a NEW face matches whichever neighbor
+        it checks, not global consistency on pre-existing inconsistent
+        input."""
         for fid in list(self._face_verts):
             self._face_normal[fid] = self._compute_normal(fid)
 
@@ -371,6 +376,44 @@ class EditMesh:
             return None  # more than one boundary loop — not disk topology
         return loop_verts
 
+    def _orient_loop_like_neighbor(self, loop, boundary_edges, face_set):
+        """Pick the traversal direction (loop, or reversed(loop)) that keeps
+        the new face's winding consistent with whichever neighboring
+        (non-cluster) face already borders this cluster — i.e. on a
+        manifold edge shared between the new face and an outside face, the
+        two faces must traverse that edge in OPPOSITE directions.
+
+        Without this, a merge's winding is arbitrary (whatever direction
+        `_walk_boundary_loop` happened to start in), so every single merge
+        risks leaving the mesh winding-inconsistent — which is exactly what
+        made `recalc_face_normals()` need a full mesh-wide winding-fix BFS
+        on every call. Orienting correctly here means winding only needs
+        fixing once per stage (on genuinely inconsistent input), not once
+        per merge.
+        """
+        n = len(loop)
+        for i in range(n):
+            a, b = loop[i], loop[(i + 1) % n]
+            eid = self._edge_key_to_id.get(frozenset((a, b)))
+            if eid is None:
+                continue
+            outside_faces = [f for f in self._edge_faces[eid] if f not in face_set]
+            if not outside_faces:
+                continue
+            outside = outside_faces[0]
+            verts = self._face_verts[outside]
+            m = len(verts)
+            idx = verts.index(a)
+            outside_forward = verts[(idx + 1) % m] == b  # outside face visits a->b
+            # A consistent mesh traverses a shared edge in opposite directions
+            # from its two faces — our loop currently visits a->b (since
+            # loop[i]=a, loop[i+1]=b), so if the outside face ALSO visits
+            # a->b, we must reverse.
+            if outside_forward:
+                return list(reversed(loop))
+            return loop
+        return loop  # no outside neighbor on this cluster's boundary — orientation is free
+
     def merge_faces(self, face_ids, dissolve_verts=False, collinear_angle_tol_deg=1.0):
         """Replace the given connected face cluster with ONE new face
         bounded by its outer walk (the shared primitive behind
@@ -402,6 +445,7 @@ class EditMesh:
         loop = self._walk_boundary_loop(boundary_edges)
         if loop is None:
             return None
+        loop = self._orient_loop_like_neighbor(loop, boundary_edges, face_set)
 
         # Any vertex strictly interior to the cluster (e.g. the apex of a
         # fan of faces all meeting at one point, with every one of its
