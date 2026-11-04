@@ -17,6 +17,13 @@ _ENGINE_ROOT = os.path.dirname(_THIS_DIR)
 # Binaries
 # ---------------------------------------------------------------------------
 
+# No longer used to launch anything (the pipeline now runs Blender in-process
+# via the `bpy` pip module — see decompose.py/finalize_component.py/
+# join_components.py/audit.py and pipeline.py). Kept only as a diagnostic:
+# the installed desktop Blender.app's version is what the installed `bpy`
+# wheel must match (same major.minor.patch) for identical operator/importer
+# behavior, so validate_environment() reports it for comparison instead of
+# requiring it.
 BLENDER_CANDIDATES = [
     "/Applications/Blender.app/Contents/MacOS/Blender",
     "blender",
@@ -83,8 +90,11 @@ PLANAR_STRAIGHTEN_DEG = 3.0  # lattice-straightening coplanarity gate
 def validate_environment():
     """Raise RuntimeError listing anything missing, else return True."""
     missing = []
-    if not BLENDER_BIN:
-        missing.append("Blender")
+    try:
+        import bpy  # noqa: F401  (presence check only)
+    except ImportError:
+        missing.append("bpy (pip install bpy; must match the installed Blender.app "
+                        "version shown by BLENDER_BIN above)")
     if not INSTANT_MESHES_BIN and not QUADRIFLOW_BIN:
         missing.append("Instant Meshes or quadriflow (need at least one remesher)")
     if missing:
@@ -93,7 +103,7 @@ def validate_environment():
 
 
 if __name__ == "__main__":
-    print("BLENDER_BIN        =", BLENDER_BIN)
+    print("BLENDER_BIN (reference only, for version matching) =", BLENDER_BIN)
     print("INSTANT_MESHES_BIN =", INSTANT_MESHES_BIN)
     print("QUADRIFLOW_BIN     =", QUADRIFLOW_BIN)
     print("DEFAULT_REMESH_BACKEND =", DEFAULT_REMESH_BACKEND)
