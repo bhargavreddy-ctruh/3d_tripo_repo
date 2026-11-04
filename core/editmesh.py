@@ -295,11 +295,25 @@ class EditMesh:
         return [e for e in self._edge_verts if len(self._edge_faces[e]) > 2]
 
     def count_islands(self):
-        """Connected components over the vertex/edge graph (matches
-        io_blender._count_islands's vertex flood fill)."""
+        """Connected components over the vertex/edge graph, counting only
+        vertices actually used by at least one face.
+
+        REAL BUG, found 2026-11-04: counting every vertex in `_vert_co`
+        (including ones no face references) treats each stray/unreferenced
+        vertex as its OWN extra island. Confirmed directly: a real Instant
+        Meshes OBJ output had 124 such leftover vertices (not referenced by
+        any face in the final output, but still written to the file) on an
+        otherwise perfectly single-island mesh, inflating the reported
+        island count from 1 to 125. An unreferenced vertex isn't a piece of
+        geometry at all, so it shouldn't count as one.
+        """
+        used_verts = set()
+        for f in self._face_verts:
+            used_verts.update(self._face_verts[f])
+
         visited = set()
         islands = 0
-        for seed in self._vert_co:
+        for seed in used_verts:
             if seed in visited:
                 continue
             islands += 1
@@ -414,12 +428,14 @@ class EditMesh:
             return loop
         return loop  # no outside neighbor on this cluster's boundary — orientation is free
 
-    def merge_faces(self, face_ids, dissolve_verts=False, collinear_angle_tol_deg=1.0):
+    def merge_faces(self, face_ids, dissolve_verts=False, collinear_angle_tol_deg=1.0,
+                     max_area_drift_frac=0.1):
         """Replace the given connected face cluster with ONE new face
         bounded by its outer walk (the shared primitive behind
         dissolve_edges/dissolve_faces/join_triangles). Returns the new face
-        id, or None if the cluster isn't a single simple-boundary disk
-        (nothing is mutated in that case).
+        id, or None if the cluster isn't a single simple-boundary disk, or
+        if accepting the merge would distort the surface too much
+        (nothing is mutated in either case).
 
         dissolve_verts=True additionally removes now-redundant collinear
         vertices from the new face's own boundary loop afterward (the
@@ -427,6 +443,23 @@ class EditMesh:
         never touches a vertex, so a vertex shared with a face outside the
         cluster (a T-junction) is always left intact (the `use_verts=False`
         safety coplanar_merge.py relies on).
+
+        max_area_drift_frac: reject (roll back) a merge whose new face's
+        own fan-triangulated area differs from the summed original faces'
+        area by more than this fraction. Found necessary directly: on a
+        strongly curved surface, a long transverse-loop merge can produce a
+        valid (non-self-intersecting) but strongly non-convex/non-planar
+        n-gon — topologically fine, but `calc_area`'s fan-triangulation
+        from one arbitrary vertex (and every other tool's, including a
+        viewer's own flat-triangulation of the same n-gon for display)
+        becomes unreliable on a shape like that, visibly: confirmed one
+        real asset where a single pass's merges inflated total triangulated
+        area by 21% and rendered as a field of sawtooth spikes, while
+        Blender's bmesh produced a near-zero-drift, visually clean result
+        on the SAME input mesh — bmesh's dissolve_edges evidently does not
+        accept a merge this distorting either. Rejecting here (leaving the
+        smaller original faces in place, to be reconsidered next pass) is
+        the direct fix.
         """
         face_set = set(face_ids)
         if len(face_set) < 2:
@@ -447,6 +480,8 @@ class EditMesh:
             return None
         loop = self._orient_loop_like_neighbor(loop, boundary_edges, face_set)
 
+        area_before = sum(self.calc_area(fid) for fid in face_set)
+
         # Any vertex strictly interior to the cluster (e.g. the apex of a
         # fan of faces all meeting at one point, with every one of its
         # edges internal to the cluster) will end up with zero edges once
@@ -459,9 +494,20 @@ class EditMesh:
         loop_set = set(loop)
         interior_candidates = {v for fid in face_set for v in self._face_verts[fid]} - loop_set
 
+        saved_faces = [self._face_verts[fid] for fid in face_set]
         for fid in face_set:
             self.remove_face(fid)
         new_fid = self.add_face(loop)
+
+        area_after = self.calc_area(new_fid)
+        if area_before > 1e-12:
+            drift = abs(area_after - area_before) / area_before
+            if drift > max_area_drift_frac:
+                # Roll back: remove the merged face, restore the originals.
+                self.remove_face(new_fid)
+                for verts in saved_faces:
+                    self.add_face(verts)
+                return None
 
         for v in interior_candidates:
             if not self._vert_edges.get(v):
