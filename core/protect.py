@@ -1,5 +1,6 @@
-"""Continuous curvature-weighted edge protection/cost field — runs under
-Blender (bpy/bmesh), operating on ONE component's remeshed mesh at a time.
+"""Continuous curvature-weighted edge protection/cost field — pure Python
+(numpy/EditMesh, no Blender), operating on ONE component's remeshed mesh
+at a time.
 
 Fixes two concrete tripo_smart_engine (`ribbon_engine.py`) bugs:
 1. The micro-feature rule used the GLOBAL median face area of the whole
@@ -25,42 +26,44 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import bpy
-import bmesh
 import numpy as np
 
 import config
-import io_blender
+import io_mesh
 
 
-def compute_edge_costs(bm, crease_deg=config.CREASE_DEG,
+def compute_edge_costs(mesh, crease_deg=config.CREASE_DEG,
                         micro_curve_deg=config.MICRO_FEATURE_CURVE_DEG,
                         micro_area_frac=config.MICRO_FEATURE_AREA_FRAC,
-                        dome_saddle_deg=config.DOME_SADDLE_DEG):
-    """Return {edge_index: cost} for every edge in bm. cost == math.inf means
+                        dome_saddle_deg=config.DOME_SADDLE_DEG,
+                        local_median_area=None):
+    """Return {edge_id: cost} for every edge in mesh. cost == math.inf means
     hard-protected (never dissolve); lower finite cost = safer/cheaper to
     dissolve first.
+
+    local_median_area: pass a precomputed value (e.g. from the mesh's state
+    before a multi-pass dissolve loop started) to skip the O(faces) median
+    recompute on every call — dissolve.py's loop calls this every pass, and
+    the component's own characteristic scale doesn't need to track the
+    shrinking face count that precisely pass to pass. Leave None to compute
+    it fresh from the mesh's current faces (the previous, always-live
+    behavior).
     """
     crease_rad = math.radians(crease_deg)
     micro_curve_rad = math.radians(micro_curve_deg)
     dome_saddle_rad = math.radians(dome_saddle_deg)
 
-    # Remeshers (Instant Meshes especially) don't always emit consistent
-    # face winding, which makes every normal-angle-based test below (crease,
-    # dome/saddle, micro-feature) see false huge deviations on an otherwise
-    # flat region. Must recalc before any angle test.
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    # recalc_face_normals() here is a plain per-face Newell computation —
+    # NOT a winding fix (see its own docstring). Callers that loop many
+    # times over a mesh whose winding is already known-consistent (e.g.
+    # dissolve.py's pass loop, which fixes winding once up front and keeps
+    # it consistent via merge_faces) should rely on that, rather than this
+    # repeated call somehow re-correcting bad winding — it no longer does.
+    mesh.recalc_face_normals()
 
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
-
-    # LOCAL median face area — this component's own faces only. This is the
-    # direct fix for the global-median bug: a small, genuinely-flat region
-    # of a small component is judged against ITS OWN scale, not the whole
-    # (possibly much larger) joined asset.
-    face_areas = np.array([f.calc_area() for f in bm.faces]) if bm.faces else np.array([0.0])
-    local_median_area = float(np.median(face_areas)) if len(face_areas) else 0.0
+    if local_median_area is None:
+        face_areas = np.array([mesh.calc_area(f) for f in mesh.faces]) if list(mesh.faces) else np.array([0.0])
+        local_median_area = float(np.median(face_areas)) if len(face_areas) else 0.0
 
     hard_protected = set()
     costs = {}
@@ -68,50 +71,55 @@ def compute_edge_costs(bm, crease_deg=config.CREASE_DEG,
     # Dome/saddle hard-protect: vertices whose surrounding face normals
     # deviate a lot on average (poles/singularities) lock all their edges.
     dome_saddle_verts = set()
-    for v in bm.verts:
-        if len(v.link_faces) < 4:
+    for v in mesh.verts:
+        link_faces = set()
+        for e in mesh.link_edges(v):
+            link_faces.update(mesh.link_faces(e))
+        if len(link_faces) < 4:
             continue
-        norms = [f.normal for f in v.link_faces if f.normal.length > 1e-4]
+        norms = [mesh.face_normal(f) for f in link_faces if np.linalg.norm(mesh.face_normal(f)) > 1e-4]
         if len(norms) < 3:
             continue
-        avg_n = sum(norms, norms[0].__class__((0, 0, 0)))
-        if avg_n.length < 1e-6:
+        avg_n = np.sum(norms, axis=0)
+        avg_len = np.linalg.norm(avg_n)
+        if avg_len < 1e-6:
             # Surrounding normals nearly cancel out (a real but rare case at
-            # a sharp fold) — Vector.angle() raises on a zero-length vector,
-            # so there's no well-defined "average deviation" here. Treat the
-            # vertex conservatively as a hard feature instead of crashing.
-            dome_saddle_verts.add(v.index)
+            # a sharp fold) — no well-defined "average deviation" here.
+            # Treat the vertex conservatively as a hard feature.
+            dome_saddle_verts.add(v)
             continue
-        avg_n.normalize()
-        devs = [f.normal.angle(avg_n) for f in v.link_faces if f.normal.length > 1e-4]
+        avg_n = avg_n / avg_len
+        devs = [_angle_between(n, avg_n) for n in norms]
         if devs and (sum(devs) / len(devs)) > dome_saddle_rad:
-            dome_saddle_verts.add(v.index)
+            dome_saddle_verts.add(v)
 
-    for e in bm.edges:
-        if e.is_boundary:
-            hard_protected.add(e.index)
-            costs[e.index] = math.inf
+    for e in mesh.edges:
+        if mesh.is_boundary(e):
+            hard_protected.add(e)
+            costs[e] = math.inf
             continue
-        if e.verts[0].index in dome_saddle_verts or e.verts[1].index in dome_saddle_verts:
-            hard_protected.add(e.index)
-            costs[e.index] = math.inf
+        v0, v1 = mesh.edge_verts(e)
+        if v0 in dome_saddle_verts or v1 in dome_saddle_verts:
+            hard_protected.add(e)
+            costs[e] = math.inf
             continue
-        if len(e.link_faces) != 2:
+        link_faces = mesh.link_faces(e)
+        if len(link_faces) != 2:
             # Non-manifold — never a safe dissolve candidate.
-            hard_protected.add(e.index)
-            costs[e.index] = math.inf
+            hard_protected.add(e)
+            costs[e] = math.inf
             continue
 
-        f0, f1 = e.link_faces
-        n0, n1 = f0.normal, f1.normal
-        if n0.length < 1e-4 or n1.length < 1e-4:
-            costs[e.index] = 0.0
+        f0, f1 = link_faces
+        n0, n1 = mesh.face_normal(f0), mesh.face_normal(f1)
+        if np.linalg.norm(n0) < 1e-4 or np.linalg.norm(n1) < 1e-4:
+            costs[e] = 0.0
             continue
-        ang = n0.angle(n1)
+        ang = _angle_between(n0, n1)
 
         if ang >= crease_rad:
-            hard_protected.add(e.index)
-            costs[e.index] = math.inf
+            hard_protected.add(e)
+            costs[e] = math.inf
             continue
 
         cost = ang  # base: flatter pairs (smaller dihedral) are cheaper
@@ -122,26 +130,29 @@ def compute_edge_costs(bm, crease_deg=config.CREASE_DEG,
         # component's own median — scales smoothly with how small/curved
         # it is, instead of an all-or-nothing protect.
         if ang > micro_curve_rad and local_median_area > 0:
-            f_min_area = min(f0.calc_area(), f1.calc_area())
+            f_min_area = min(mesh.calc_area(f0), mesh.calc_area(f1))
             threshold = local_median_area * micro_area_frac
             if f_min_area < threshold:
                 shrink_frac = 1.0 - (f_min_area / threshold)
                 cost += shrink_frac * crease_rad  # up to ~crease cost, never inf
 
-        costs[e.index] = cost
+        costs[e] = cost
 
     return costs, hard_protected, local_median_area
 
 
+def _angle_between(a, b):
+    """Angle in radians between two (assumed near-unit) vectors — matches
+    mathutils.Vector.angle()."""
+    cos_a = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    return math.acos(cos_a)
+
+
 def compute_costs_for_obj(obj_path, **kwargs):
-    io_blender.clear_scene()
-    mesh_objs = io_blender.import_mesh(obj_path)
-    if not mesh_objs:
-        return {"error": "no mesh objects found"}
-    obj = mesh_objs[0]
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    costs, hard_protected, local_median_area = compute_edge_costs(bm, **kwargs)
+    mesh = io_mesh.load(obj_path)
+    if not list(mesh.faces):
+        return {"error": "no mesh faces found"}
+    costs, hard_protected, local_median_area = compute_edge_costs(mesh, **kwargs)
 
     finite = [c for c in costs.values() if math.isfinite(c)]
     summary = {
@@ -154,43 +165,36 @@ def compute_costs_for_obj(obj_path, **kwargs):
         "finite_cost_median": float(np.median(finite)) if finite else None,
         "finite_cost_max": max(finite) if finite else None,
     }
-    bm.free()
     return summary
 
 
 def dump_edges_for_render(obj_path, out_json, **kwargs):
     """Export every edge's endpoint coordinates + cost/protected flag, so a
-    separate (non-bpy) script can render a color-coded wireframe for an eye
-    check — required verification, not optional, per the "no step moves
-    forward unverified" instruction."""
-    io_blender.clear_scene()
-    mesh_objs = io_blender.import_mesh(obj_path)
-    obj = mesh_objs[0]
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    costs, hard_protected, local_median_area = compute_edge_costs(bm, **kwargs)
+    separate script can render a color-coded wireframe for an eye check —
+    required verification, not optional, per the "no step moves forward
+    unverified" instruction."""
+    mesh = io_mesh.load(obj_path)
+    costs, hard_protected, local_median_area = compute_edge_costs(mesh, **kwargs)
 
-    bm.edges.ensure_lookup_table()
     edges_out = []
-    for e in bm.edges:
-        v0, v1 = e.verts[0].co, e.verts[1].co
+    for e in mesh.edges:
+        v0, v1 = mesh.edge_verts(e)
+        p0, p1 = mesh.vert_co(v0), mesh.vert_co(v1)
         edges_out.append({
-            "p0": [v0.x, v0.y, v0.z],
-            "p1": [v1.x, v1.y, v1.z],
-            "cost": None if math.isinf(costs[e.index]) else costs[e.index],
-            "protected": e.index in hard_protected,
+            "p0": [float(p0[0]), float(p0[1]), float(p0[2])],
+            "p1": [float(p1[0]), float(p1[1]), float(p1[2])],
+            "cost": None if math.isinf(costs[e]) else costs[e],
+            "protected": e in hard_protected,
         })
     with open(out_json, "w") as fh:
         json.dump({"obj_path": obj_path, "edges": edges_out}, fh)
-    bm.free()
     return out_json
 
 
 if __name__ == "__main__":
-    argv = sys.argv
-    args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
+    args = sys.argv[1:]
     if not args:
-        print("Usage: blender --background --python protect.py -- <component.obj> [--dump-edges out.json]")
+        print("Usage: python3 protect.py <component.obj> [--dump-edges out.json]")
         sys.exit(1)
 
     if "--dump-edges" in args:

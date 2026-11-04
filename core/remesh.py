@@ -18,19 +18,58 @@ import numpy as np
 import trimesh
 
 import config
+import obj_io
 
 
 def count_islands(obj_path):
-    """Connected-component count via trimesh — used to catch a remesher
+    """Connected-component count over the OBJ's own vertex/face adjacency
+    (union-find on shared vertex indices) — used to catch a remesher
     silently shattering a single solid component into shrapnel (a real,
     observed Instant Meshes failure mode on one of the dresser's
     components: 1 island in -> 407 islands out, visually confirmed as
-    garbage triangle fragments, not real detail)."""
-    mesh = trimesh.load(obj_path, process=False, force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+    garbage triangle fragments, not real detail).
+
+    REAL BUG, found 2026-11-04: this used to load the file with
+    `trimesh.load(path, process=False, force="mesh")`. With process=False,
+    trimesh's OBJ loader does NOT weld shared vertex indices when it
+    triangulates a quad/n-gon face — confirmed directly on a real Instant
+    Meshes output (a clean, 96%-quad, single-island 4971-face mesh):
+    trimesh reported 19,846 vertices for a file that only has 5,009 (every
+    face effectively got its own private copy of each corner), so
+    `mesh.split()` then saw ~4,971 "islands" for a mesh that was actually
+    ONE connected piece. That false fragmentation reading caused a
+    perfectly good quad-dominant remesh to be thrown away in favor of the
+    crude, non-quad quadric-decimation fallback on every asset where this
+    triggered — this one counting bug was the real cause of both the "why
+    isn't this quad-dominant" and "why does this look cracked" complaints,
+    not a real remesher failure. `obj_io.load()` preserves native face
+    arity and real shared-vertex connectivity, so this is computed
+    correctly here instead.
+    """
+    vertices, faces = obj_io.load(obj_path)
+    if not faces:
         return 0
-    pieces = mesh.split(only_watertight=False)
-    return len(pieces)
+    n = len(vertices)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for f in faces:
+        for i in range(1, len(f)):
+            union(f[0], f[i])
+
+    used_verts = {v for f in faces for v in f}
+    roots = {find(v) for v in used_verts}
+    return len(roots)
 
 
 def is_fragmented(out_obj, input_islands=1, max_islands=5, max_island_ratio=3):
