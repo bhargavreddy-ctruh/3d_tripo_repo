@@ -3,7 +3,8 @@
 Same metrics, same formulas; reimplemented against this project's
 `io_blender` helpers instead of a separately embedded Blender script, so it
 shares the same import/bmesh conventions as the rest of vacuum_quad_engine.
-Runs under Blender (bpy/bmesh).
+Runs under Blender (bpy/bmesh): imported in-process by pipeline.py via the
+`bpy` pip module, or standalone as `python3 audit.py <mesh_file>`.
 """
 
 import json
@@ -138,7 +139,7 @@ if __name__ == "__main__":
     argv = sys.argv
     args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
     if not args:
-        print("Usage: blender --background --python audit.py -- <mesh_file.(obj|fbx|glb)>")
+        print("Usage: python3 audit.py <mesh_file.(obj|fbx|glb)>")
         sys.exit(1)
     stats = audit_mesh(args[0])
     print_audit_report(stats)
