@@ -98,11 +98,7 @@ def compute_edge_costs(mesh, crease_deg=config.CREASE_DEG,
             hard_protected.add(e)
             costs[e] = math.inf
             continue
-        v0, v1 = mesh.edge_verts(e)
-        if v0 in dome_saddle_verts or v1 in dome_saddle_verts:
-            hard_protected.add(e)
-            costs[e] = math.inf
-            continue
+
         link_faces = mesh.link_faces(e)
         if len(link_faces) != 2:
             # Non-manifold — never a safe dissolve candidate.
@@ -118,6 +114,15 @@ def compute_edge_costs(mesh, crease_deg=config.CREASE_DEG,
         ang = _angle_between(n0, n1)
 
         if ang >= crease_rad:
+            hard_protected.add(e)
+            costs[e] = math.inf
+            continue
+
+        v0, v1 = mesh.edge_verts(e)
+        if (v0 in dome_saddle_verts or v1 in dome_saddle_verts) and ang > micro_curve_rad:
+            # Only lock dome/saddle neighborhood edges that actually curve;
+            # flat transverse edges (ang <= micro_curve_rad) meeting a straight
+            # 90-deg crease are safe ribbon-simplification candidates.
             hard_protected.add(e)
             costs[e] = math.inf
             continue

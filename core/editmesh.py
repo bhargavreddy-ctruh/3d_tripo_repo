@@ -272,18 +272,21 @@ class EditMesh:
         return len(faces_to_flip)
 
     def calc_area(self, fid):
-        """Fan-triangulated area from the face's own vertex positions —
-        matches dissolve.py's `_total_area_triangulated` convention (not a
-        best-fit-plane projection), used as the real safety-check measure
-        everywhere in this codebase."""
+        """3D polygon area using Newell's method (Stokes' theorem contour
+        integration) — robust to polygon shape and orientation, eliminating
+        fan-triangulation drift artifacts on flat non-convex boundaries."""
         verts = [self._vert_co[v] for v in self._face_verts[fid]]
         if len(verts) < 3:
             return 0.0
-        total = 0.0
-        v0 = verts[0]
-        for i in range(1, len(verts) - 1):
-            total += 0.5 * float(np.linalg.norm(np.cross(verts[i] - v0, verts[i + 1] - v0)))
-        return total
+        coords = np.array(verts)
+        newell = np.zeros(3)
+        n = len(coords)
+        for i in range(n):
+            c1, c2 = coords[i], coords[(i + 1) % n]
+            newell[0] += (c1[1] - c2[1]) * (c1[2] + c2[2])
+            newell[1] += (c1[2] - c2[2]) * (c1[0] + c2[0])
+            newell[2] += (c1[0] - c2[0]) * (c1[1] + c2[1])
+        return 0.5 * float(np.linalg.norm(newell))
 
     def total_area(self):
         return sum(self.calc_area(f) for f in self._face_verts)
