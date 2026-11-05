@@ -70,21 +70,26 @@ def _trace_direction(mesh, start_e, start_v, cost_map, protected_set):
     v = start_v
     e = start_e
     visited_verts = {v}
-    hit_end = False
     while True:
+        if mesh.is_boundary(e) or e in protected_set:
+            return loop, True
+        edges = list(mesh.link_edges(v))
+        if any(mesh.is_boundary(ed) or ed in protected_set for ed in edges):
+            return loop, True  # reached a boundary / feature crease cleanly
+
         nxt = _get_continuation(mesh, v, e, cost_map, protected_set)
         if nxt is None:
-            hit_end = True
-            break
+            # Hit valence != 4 in interior without touching boundary/crease:
+            # this would be a dead-end half-line! Reject.
+            return loop, False
         other = mesh.other_vert(nxt, v)
         if other in visited_verts:
-            hit_end = True  # closed ring
-            break
+            return loop, True  # closed ring
         loop.append(nxt)
         visited_verts.add(other)
         v = other
         e = nxt
-    return loop, hit_end
+    return loop, False
 
 
 def trace_full_transverse_loop(mesh, start_edge, cost_map, protected_set):
@@ -169,6 +174,23 @@ def simplify_component(mesh, max_passes=20, hard_fail_area_drift=5.0,
             loop = trace_full_transverse_loop(mesh, e, cost_map, protected_set)
             if loop is None or len(loop) < 1:
                 continue
+
+            # Check flatness along the loop (only dissolve planar loops to maintain proper quads)
+            valid_flat = True
+            for le in loop:
+                lf = mesh.link_faces(le)
+                if len(lf) != 2:
+                    valid_flat = False
+                    break
+                n0 = mesh.face_normal(lf[0])
+                n1 = mesh.face_normal(lf[1])
+                cos_a = float(np.clip(np.dot(n0, n1), -1.0, 1.0))
+                if math.degrees(math.acos(cos_a)) > 4.0:
+                    valid_flat = False
+                    break
+            if not valid_flat:
+                continue
+
             loops.append(loop)
             for le in loop:
                 visited.add(le)
@@ -199,25 +221,39 @@ def simplify_component(mesh, max_passes=20, hard_fail_area_drift=5.0,
         n_boundary_before = len(mesh.boundary_edges())
         n_before_faces = len(list(mesh.faces))
 
-        # Each accepted loop's touched-face set is disjoint from every other
-        # (enforced by the greedy accept above) — merge each one into its
-        # own n-gon. Equivalent to a single batched dissolve_edges call over
-        # the union of all accepted loops' edges, since disjoint groups
-        # never interact FACE-wise — but two different loops' resulting
-        # faces CAN share a boundary VERTEX, and dissolve_verts=True's
-        # collinear-vertex cleanup rebuilds every face touching a vertex it
-        # removes. If that shared vertex sits on a not-yet-processed loop's
-        # still-pending face, this can silently replace that face with a
-        # new id before we reach it below — skip (rather than crash on) a
-        # loop whose faces are no longer all present; it'll be reconsidered
-        # fresh next pass since costs are recomputed from scratch each time.
-        all_faces = mesh.faces
-        for _loop, faces in accepted:
-            if len(faces) < 2:
+        # Pairwise quad merge along each accepted full loop:
+        # Merges adjacent quads row-by-row across the loop edges rather than
+        # collapsing the entire multi-row strip into one giant N-gon. This
+        # preserves cross-cutting edge lines as full lines and maintains 4-sided
+        # proper quads with unbroken edge flow.
+        for loop, _faces in accepted:
+            if not all(le in mesh._edge_faces for le in loop):
                 continue
-            if not all(f in all_faces for f in faces):
-                continue
-            mesh.merge_faces(faces, dissolve_verts=True)
+            loop_verts = set()
+            for le in loop:
+                if le in mesh._edge_verts:
+                    v0, v1 = mesh.edge_verts(le)
+                    loop_verts.add(v0)
+                    loop_verts.add(v1)
+
+            loop_success = True
+            for le in loop:
+                if le not in mesh._edge_faces:
+                    continue
+                lf = mesh.link_faces(le)
+                if len(lf) != 2:
+                    continue
+                f0, f1 = lf[0], lf[1]
+                if f0 not in mesh._face_verts or f1 not in mesh._face_verts:
+                    continue
+                new_f = mesh.merge_faces([f0, f1], dissolve_verts=False)
+                if new_f is None:
+                    loop_success = False
+
+            if loop_success:
+                valid_verts = [v for v in loop_verts if v in mesh._vert_co]
+                if valid_verts:
+                    mesh.dissolve_collinear_verts(valid_verts, angle_tol_deg=10.0)
 
         n_boundary_after = len(mesh.boundary_edges())
 

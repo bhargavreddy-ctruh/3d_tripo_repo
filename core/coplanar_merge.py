@@ -36,6 +36,134 @@ import numpy as np
 import io_mesh
 
 
+def trace_ribbon_transverse_line(mesh, start_e, creases, flat_edges):
+    if start_e not in flat_edges or mesh.is_boundary(start_e):
+        return None
+
+    def step_to_seam(curr_e, curr_v):
+        loop = [curr_e]
+        e = curr_e
+        v = curr_v
+        visited_v = {v}
+        while True:
+            edges = list(mesh.link_edges(v))
+            if any(ed in creases for ed in edges) or len(edges) != 4 or mesh.is_boundary(e):
+                return loop, True
+            in_faces = set(mesh.link_faces(e))
+            nxt = None
+            for cand in edges:
+                if cand != e and cand in flat_edges and not (set(mesh.link_faces(cand)) & in_faces):
+                    nxt = cand
+                    break
+            if nxt is None:
+                return loop, True
+            other_v = mesh.other_vert(nxt, v)
+            if other_v in visited_v:
+                return loop, True
+            loop.append(nxt)
+            visited_v.add(other_v)
+            e = nxt
+            v = other_v
+            if len(loop) > 30:
+                return loop, False
+
+    v0, v1 = mesh.edge_verts(start_e)
+    back_loop, back_ok = step_to_seam(start_e, v0)
+    fwd_loop, fwd_ok = step_to_seam(start_e, v1)
+
+    if not (back_ok and fwd_ok):
+        return None
+
+    return list(reversed(back_loop[1:])) + [start_e] + fwd_loop[1:]
+
+
+def merge_ribbon_lines(mesh, max_passes=6, crease_deg=18.0, flat_deg=4.0):
+    crease_rad = math.radians(crease_deg)
+    flat_rad = math.radians(flat_deg)
+    total_dissolved = 0
+    for pass_idx in range(max_passes):
+        creases = set()
+        flat_edges = set()
+        for e in mesh.edges:
+            if mesh.is_boundary(e):
+                creases.add(e)
+                continue
+            lf = mesh.link_faces(e)
+            if len(lf) != 2:
+                creases.add(e)
+                continue
+            n0 = mesh.face_normal(lf[0])
+            n1 = mesh.face_normal(lf[1])
+            cos_a = float(np.clip(np.dot(n0, n1), -1.0, 1.0))
+            ang = math.acos(cos_a)
+            if ang >= crease_rad:
+                creases.add(e)
+            elif ang <= flat_rad:
+                flat_edges.add(e)
+
+        candidates = sorted(
+            list(flat_edges),
+            key=lambda e: min(mesh.calc_area(f) for f in mesh.link_faces(e))
+        )
+        valid_lines = []
+        visited = set()
+        for e in candidates:
+            if e in visited:
+                continue
+            line = trace_ribbon_transverse_line(mesh, e, creases, flat_edges)
+            if line:
+                valid_lines.append(line)
+                for le in line:
+                    visited.add(le)
+
+        if not valid_lines:
+            break
+
+        used_faces = set()
+        accepted_lines = []
+        for line in valid_lines:
+            faces = set()
+            for le in line:
+                faces.update(mesh.link_faces(le))
+            if faces & used_faces:
+                continue
+            used_faces |= faces
+            accepted_lines.append(line)
+
+        dissolved = 0
+        for line in accepted_lines:
+            if not all(le in mesh._edge_faces for le in line):
+                continue
+            line_verts = set()
+            for le in line:
+                v0, v1 = mesh.edge_verts(le)
+                line_verts.add(v0)
+                line_verts.add(v1)
+            line_ok = True
+            for le in line:
+                if le not in mesh._edge_faces:
+                    continue
+                lf = mesh.link_faces(le)
+                if len(lf) != 2:
+                    continue
+                f0, f1 = lf[0], lf[1]
+                if f0 not in mesh._face_verts or f1 not in mesh._face_verts:
+                    continue
+                new_f = mesh.merge_faces([f0, f1], dissolve_verts=False)
+                if new_f is None:
+                    line_ok = False
+            if line_ok:
+                dissolved += 1
+                valid_verts = [v for v in line_verts if v in mesh._vert_co]
+                if valid_verts:
+                    mesh.dissolve_collinear_verts(valid_verts, angle_tol_deg=10.0)
+
+        total_dissolved += dissolved
+        if dissolved == 0:
+            break
+    return total_dissolved
+
+
 def find_coplanar_clusters(mesh, angle_tol_deg=2.0):
     """BFS over faces: cross an edge only if it's a manifold interior edge
     (never a boundary) and the two adjacent faces' normals differ by less
@@ -102,6 +230,12 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
 
     n_boundary_before = len(mesh.boundary_edges())
     n_faces_before = len(list(mesh.faces))
+
+    t_ribbons0 = time.perf_counter()
+    n_ribbons_dissolved = merge_ribbon_lines(mesh, max_passes=6, crease_deg=18.0, flat_deg=4.0)
+    t_ribbons = time.perf_counter()
+    print(f"[coplanar_merge] ribbon_lines_merge={t_ribbons-t_ribbons0:.2f}s "
+          f"({n_ribbons_dissolved} lines dissolved)", flush=True)
 
     clusters = find_coplanar_clusters(mesh, angle_tol_deg=angle_tol_deg)
     multi_face_clusters = [c for c in clusters if len(c) > 1]

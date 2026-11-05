@@ -39,6 +39,15 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
 
     stage_errors = {}
 
+    # 1. Triangle-pair merge first (turns coplanar triangles into clean quads
+    # so loop traversal can walk through them)
+    darts_stats = None
+    try:
+        darts_stats = darts.merge_coplanar_triangle_pairs(mesh)
+    except Exception as e:
+        stage_errors["darts"] = str(e)
+
+    # 2. Strict full-line pairwise quad simplification (preserves 100% quads and edge flow)
     dissolve_stats = None
     try:
         dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes)
@@ -46,15 +55,11 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
         stage_errors["dissolve"] = str(e)
         mesh = io_mesh.load(remeshed_obj)
 
-    darts_stats = None
-    try:
-        darts_stats = darts.merge_coplanar_triangle_pairs(mesh)
-    except Exception as e:
-        stage_errors["darts"] = str(e)
-
+    # 3. Clean ribbon line simplification (seam-to-seam cross-line merges along beams)
     coplanar_merge_stats = None
     try:
-        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh)
+        n_ribbon_lines = coplanar_merge.merge_ribbon_lines(mesh, max_passes=6)
+        coplanar_merge_stats = {"ribbon_lines_merged": n_ribbon_lines}
     except Exception as e:
         stage_errors["coplanar_merge"] = str(e)
 
