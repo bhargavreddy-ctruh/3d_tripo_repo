@@ -18,14 +18,13 @@ import sys
 
 import numpy as np
 import trimesh
+import trimesh.curvature as tc
 
 try:
     import igl
-except ImportError as e:
-    raise ImportError(
-        "libigl is required for curvature.py and is NOT available in "
-        "Blender's bundled python — run this under system python3."
-    ) from e
+    HAS_IGL = True
+except ImportError:
+    HAS_IGL = False
 
 
 def load_mesh(path):
@@ -45,15 +44,22 @@ def compute_vertex_curvature(mesh: trimesh.Trimesh, radius=5):
     v = np.asarray(mesh.vertices, dtype=np.float64)
     f = np.asarray(mesh.faces, dtype=np.int64)
 
-    pd1, pd2, pv1, pv2, bad_vertices = igl.principal_curvature(v, f, radius=radius)
-    if bad_vertices:
-        # A handful of degenerate/non-manifold vertices can fail the
-        # curvature fit on real AI-generated meshes; libigl returns 0 for
-        # them, which is already a safe ("flat") default for sizing/protect.
-        pass
-    kappa = np.maximum(np.abs(pv1), np.abs(pv2))  # dominant curvature magnitude
-    mean_curvature = 0.5 * (pv1 + pv2)
-    gaussian_curvature = pv1 * pv2
+    if HAS_IGL:
+        pd1, pd2, pv1, pv2, bad_vertices = igl.principal_curvature(v, f, radius=radius)
+        if bad_vertices:
+            pass
+        kappa = np.maximum(np.abs(pv1), np.abs(pv2))
+        mean_curvature = 0.5 * (pv1 + pv2)
+        gaussian_curvature = pv1 * pv2
+    else:
+        defects = np.abs(tc.vertex_defects(mesh))
+        kappa = defects
+        pv1 = kappa
+        pv2 = kappa
+        pd1 = np.zeros_like(v)
+        pd2 = np.zeros_like(v)
+        mean_curvature = kappa
+        gaussian_curvature = kappa ** 2
 
     return {
         "k1": pv1,

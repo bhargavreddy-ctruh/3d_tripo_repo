@@ -37,44 +37,63 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
     """
     mesh = io_mesh.load(remeshed_obj)
 
+    # 0. Clean pre-existing input artifacts (degenerate bowtie faces, duplicate faces, non-manifold flaps)
+    seen = {}
+    for f in list(mesh.faces):
+        fv = mesh.face_verts(f)
+        if len(fv) < 3:
+            mesh.remove_face(f)
+            continue
+        unique_fv = list(dict.fromkeys(fv))
+        if len(unique_fv) < 3:
+            mesh.remove_face(f)
+            continue
+        if len(unique_fv) < len(fv):
+            mesh.remove_face(f)
+            mesh.add_face(tuple(unique_fv))
+            continue
+        key = tuple(sorted(fv))
+        if key in seen:
+            mesh.remove_face(f)
+        else:
+            seen[key] = f
+
+    for e in list(mesh.non_manifold_edges()):
+        lf = list(mesh.link_faces(e))
+        while len(lf) > 2:
+            best_f = min(lf, key=lambda f: mesh.calc_area(f))
+            mesh.remove_face(best_f)
+            lf = list(mesh.link_faces(e))
+
     stage_errors = {}
 
-    # 1. Triangle-pair merge first (turns coplanar triangles into clean quads
-    # so loop traversal can walk through them)
-    darts_stats = None
-    try:
-        darts_stats = darts.merge_coplanar_triangle_pairs(mesh)
-    except Exception as e:
-        stage_errors["darts"] = str(e)
-
-    # 2. Strict full-line pairwise quad simplification (preserves 100% quads and edge flow)
+    # 1. Strict full-line pairwise quad simplification (preserves 100% quads and edge flow)
     dissolve_stats = None
     try:
-        dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes)
+        dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes, max_flat_deg=12.0)
     except Exception as e:
         stage_errors["dissolve"] = str(e)
         mesh = io_mesh.load(remeshed_obj)
 
-    # 3. Clean ribbon line simplification (seam-to-seam cross-line merges along beams)
+    # 2. Triangle-pair merge (turns coplanar triangles into clean quads so loop traversal can walk through them)
+    darts_stats = None
+    try:
+        darts_stats = darts.merge_coplanar_triangle_pairs(mesh, angle_face_deg=18.0)
+    except Exception as e:
+        stage_errors["darts"] = str(e)
+
+    # 3. Pull 3 Coplanar Region Merging: merges planar clusters into minimal clean faces
+    # (eliminates all interior diagonal chords and redundant edges across flat surfaces)
     coplanar_merge_stats = None
     try:
-        n_ribbon_lines = coplanar_merge.merge_ribbon_lines(mesh, max_passes=6)
-        coplanar_merge_stats = {"ribbon_lines_merged": n_ribbon_lines}
+        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh, angle_tol_deg=10.0)
     except Exception as e:
         stage_errors["coplanar_merge"] = str(e)
 
-    # Boundary collinear-vertex cleanup: coplanar_merge deliberately keeps
-    # every boundary vertex in place (use_verts=False, for T-junction
-    # safety -- see its own docstring), which leaves a merged flat region's
-    # EDGE looking like many small collinear segments instead of one clean
-    # straight line, even though the FACE itself is already correctly
-    # merged. This only targets valence-2 vertices (by construction never
-    # shared with any other face/edge, so no T-junction risk at all) that
-    # sit exactly on the straight line between their two neighbors --
-    # lossless, not an approximation.
+    # 4. Boundary collinear-vertex cleanup: dissolves valence-2 collinear vertices along straight boundaries
     collinear_cleanup_stats = None
     try:
-        n_removed = mesh.dissolve_collinear_verts(list(mesh.verts))
+        n_removed = mesh.dissolve_collinear_verts(list(mesh.verts), angle_tol_deg=10.0)
         collinear_cleanup_stats = {"verts_removed": n_removed}
     except Exception as e:
         stage_errors["collinear_cleanup"] = str(e)
@@ -84,6 +103,12 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
         caps_results = caps.cap_all_planar_boundaries(mesh)
     except Exception as e:
         stage_errors["caps"] = str(e)
+
+    # 5. Clean up any remaining adjacent coplanar triangles into quads
+    try:
+        darts.merge_coplanar_triangle_pairs(mesh, angle_face_deg=18.0)
+    except Exception:
+        pass
 
     # caps.py's new faces (bevel ring + chord strips) are not guaranteed to
     # match the surrounding mesh's existing winding direction —
@@ -95,6 +120,14 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
         winding_fix_stats = {"faces_flipped": n_flipped}
     except Exception as e:
         stage_errors["fix_winding"] = str(e)
+
+    # 2-manifoldness safety enforcement
+    for e in list(mesh.non_manifold_edges()):
+        lf = list(mesh.link_faces(e))
+        while len(lf) > 2:
+            best_f = min(lf, key=lambda f: mesh.calc_area(f))
+            mesh.remove_face(best_f)
+            lf = list(mesh.link_faces(e))
 
     tmp_path = out_obj + ".pre_reproject.obj"
     io_mesh.export(tmp_path, mesh, quads=True)

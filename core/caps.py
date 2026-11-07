@@ -74,24 +74,63 @@ def cap_boundary_loop(mesh, loop_edges, inset_frac=0.88):
     if not planar:
         return {"ok": False, "reason": "not planar enough"}
 
-    # Bevel ring: inset copy of the loop.
+    # Guard: skip long skinny boundary slits to prevent creating 1D barcode slats
+    t1 = np.cross(normal, [0, 0, 1]) if abs(normal[2]) < 0.9 else np.cross(normal, [1, 0, 0])
+    l1 = np.linalg.norm(t1)
+    if l1 > 1e-9:
+        t1 = t1 / l1
+        t2 = np.cross(normal, t1)
+        u = [np.dot(c - centroid, t1) for c in coords]
+        v_coords = [np.dot(c - centroid, t2) for c in coords]
+        span_u = max(u) - min(u)
+        span_v = max(v_coords) - min(v_coords)
+        loop_ar = max(span_u, span_v) / max(min(span_u, span_v), 1e-6)
+        if loop_ar > 3.0:
+            return {"ok": False, "reason": f"loop aspect ratio {loop_ar:.2f} > 3.0, skipped"}
+
+    if n == 4:
+        mesh.add_face(verts)
+        return {"ok": True, "loop_len": 4, "bevel_quads": 1, "chord_quads": 0}
+    elif n == 6:
+        mesh.add_face([verts[0], verts[1], verts[2], verts[5]])
+        mesh.add_face([verts[5], verts[2], verts[3], verts[4]])
+        return {"ok": True, "loop_len": 6, "bevel_quads": 2, "chord_quads": 0}
+
+    # For n >= 8: balanced inset (0.5), not extreme (0.88)
+    inset_frac = 0.5
     inset_verts = [mesh.add_vert(centroid + (c - centroid) * inset_frac) for c in coords]
+    new_faces = []
     for i in range(n):
         j = (i + 1) % n
-        mesh.add_face([verts[i], verts[j], inset_verts[j], inset_verts[i]])
+        new_faces.append([verts[i], verts[j], inset_verts[j], inset_verts[i]])
 
-    # Parallel chord strips across the inset polygon: pair vertex i with
-    # its mirror i+n/2, connect consecutive pairs into quads.
     half = n // 2
     chord_pairs = [(inset_verts[i], inset_verts[i + half]) for i in range(half)]
-    n_chord_faces = 0
     for i in range(half - 1):
         a0, a1 = chord_pairs[i]
         b0, b1 = chord_pairs[i + 1]
-        mesh.add_face([a0, b0, b1, a1])
-        n_chord_faces += 1
+        new_faces.append([a0, b0, b1, a1])
 
-    return {"ok": True, "loop_len": n, "bevel_quads": n, "chord_quads": n_chord_faces}
+    # Check aspect ratio of all proposed cap quads to prevent barcode slats
+    for f in new_faces:
+        v0, v1, v2, v3 = (mesh.vert_co(v) for v in f)
+        l0 = np.linalg.norm(v1 - v0)
+        l1 = np.linalg.norm(v2 - v1)
+        l2 = np.linalg.norm(v3 - v2)
+        l3 = np.linalg.norm(v0 - v3)
+        u_len = 0.5 * (l0 + l2)
+        v_len = 0.5 * (l1 + l3)
+        ar = max(u_len, v_len) / max(min(u_len, v_len), 1e-7)
+        if ar > 3.5:
+            # Revert added inset verts
+            for iv in inset_verts:
+                mesh.remove_vert(iv)
+            return {"ok": False, "reason": f"cap quad aspect ratio {ar:.2f} > 3.5"}
+
+    for f in new_faces:
+        mesh.add_face(f)
+
+    return {"ok": True, "loop_len": n, "bevel_quads": n, "chord_quads": half - 1}
 
 
 def cap_all_planar_boundaries(mesh, min_loop_len=4):

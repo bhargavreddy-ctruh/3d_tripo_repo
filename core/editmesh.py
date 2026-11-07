@@ -96,8 +96,9 @@ class EditMesh:
             if eid is None:
                 continue
             lf = self._edge_faces.get(eid)
-            if lf is not None and fid in lf:
-                lf.remove(fid)
+            if lf is not None:
+                while fid in lf:
+                    lf.remove(fid)
             if not lf:
                 # Orphaned edge (no face references it any more) — drop it.
                 del self._edge_faces[eid]
