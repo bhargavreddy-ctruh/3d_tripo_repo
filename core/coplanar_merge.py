@@ -347,6 +347,52 @@ def find_coplanar_clusters(mesh, angle_tol_deg=2.0):
     return clusters
 
 
+def _merge_non_disk_cluster_pairs(mesh, angle_tol_deg=10.0, max_dev=0.005, max_passes=15):
+    """Iteratively merges adjacent coplanar face pairs for clusters with internal holes
+    or non-disk topology, building clean large panels around features without creating
+    invalid topological voids.
+    """
+    cos_tol = math.cos(math.radians(angle_tol_deg))
+    total_merged = 0
+    for _ in range(max_passes):
+        used = set()
+        pairs = []
+        for f1 in list(mesh.faces):
+            if f1 in used or f1 not in mesh._face_verts:
+                continue
+            n1 = mesh.face_normal(f1)
+            p0 = mesh.vert_co(mesh.face_verts(f1)[0])
+            for e in mesh.face_edges(f1):
+                lf = list(mesh.link_faces(e))
+                if len(lf) != 2:
+                    continue
+                f2 = lf[0] if lf[1] == f1 else lf[1]
+                if f2 in used or f2 not in mesh._face_verts or f2 <= f1:
+                    continue
+                n2 = mesh.face_normal(f2)
+                if np.dot(n1, n2) < cos_tol:
+                    continue
+                pts2 = [mesh.vert_co(v) for v in mesh.face_verts(f2)]
+                dev = max(abs(np.dot(p - p0, n1)) for p in pts2)
+                if dev > max_dev:
+                    continue
+                pairs.append((f1, f2))
+                used.add(f1)
+                used.add(f2)
+                break
+        if not pairs:
+            break
+        merged_pass = 0
+        for f1, f2 in pairs:
+            if f1 in mesh._face_verts and f2 in mesh._face_verts:
+                if mesh.merge_faces([f1, f2], dissolve_verts=False) is not None:
+                    merged_pass += 1
+        total_merged += merged_pass
+        if merged_pass == 0:
+            break
+    return total_merged
+
+
 def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
                             collinear_angle_tol_deg=1.0):
     """Mutates mesh in place. Returns stats dict."""
@@ -400,9 +446,15 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
         else:
             n_skipped_non_disk += 1
 
+    # For non-disk clusters (regions with internal holes/features/tufting):
+    # Pairwise merge coplanar face pairs so large clean panels form around features
+    n_pairwise_merged = 0
+    if n_skipped_non_disk > 0:
+        n_pairwise_merged = _merge_non_disk_cluster_pairs(mesh, angle_tol_deg=angle_tol_deg, max_dev=0.005)
+
     t_dissolve = time.perf_counter()
     print(f"[coplanar_merge] dissolve_faces_loop={t_dissolve-t_flood_fill:.2f}s "
-          f"({n_merged} merged)", flush=True)
+          f"({n_merged} disk merged, {n_pairwise_merged} pairwise non-disk merged)", flush=True)
 
     n_collinear_removed = 0
     if collapse_collinear:
