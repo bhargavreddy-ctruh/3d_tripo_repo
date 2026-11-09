@@ -438,14 +438,59 @@ def decompose_polygon_existing_verts(pts_2d, v_ids):
     return [("tri", (v_ids[t[0]], v_ids[t[1]], v_ids[t[2]])) for t in tris]
 
 
+def _edge_already_at_full_valence(mesh, a, b, exclude_fid=None):
+    """True if an edge already exists between verts a/b with >= 2 link
+    faces (other than exclude_fid). decompose_polygon_existing_verts picks
+    diagonals from pure 2D geometry, with no awareness that two n-gon
+    vertices might already be connected by a real edge elsewhere in the
+    mesh (from an unrelated face pair formed earlier in the pipeline) -
+    committing such a diagonal would push that edge to 3 link faces
+    (non-manifold). Caught via a real pipeline run: 2 of 5500 n-gons on a
+    production asset hit this (#dome_caps/n-gon work, 2026-11)."""
+    for eid in mesh._vert_edges.get(a, ()):
+        ev = mesh._edge_verts[eid]
+        if (ev[0] == a and ev[1] == b) or (ev[0] == b and ev[1] == a):
+            link_faces = [f for f in mesh._edge_faces.get(eid, []) if f != exclude_fid]
+            return len(link_faces) >= 2
+    return False
+
+
+def _sub_faces_collide_with_existing_topology(mesh, fverts, sub_faces, fid):
+    """Checks every edge of every proposed sub-face against the mesh's
+    current edge table (excluding the n-gon fid itself, whose own boundary
+    edges are expected to still show it as one of their two link faces).
+    Only an edge NOT on the n-gon's own boundary (i.e. a new diagonal) can
+    legitimately collide - boundary edges are being handed off from the
+    n-gon to its replacement sub-face, not duplicated."""
+    n = len(fverts)
+    boundary_edges = set()
+    for i in range(n):
+        boundary_edges.add(frozenset((fverts[i], fverts[(i + 1) % n])))
+    for _ftype, vtuple in sub_faces:
+        k = len(vtuple)
+        for i in range(k):
+            a, b = vtuple[i], vtuple[(i + 1) % k]
+            if frozenset((a, b)) in boundary_edges:
+                continue
+            if _edge_already_at_full_valence(mesh, a, b, exclude_fid=fid):
+                return True
+    return False
+
+
 def resolve_all_ngons(mesh, angle_shape_deg=90.0):
-    """Guarantees strictly 0% N-gons in output mesh (sum [|V(f)| > 4] == 0).
-    Decomposes N-gons keeping lines straight onto straight edges using ONLY
-    existing vertices (never creating T-junctions, dangling edges, or holes).
+    """Guarantees strictly 0% N-gons in output mesh (sum [|V(f)| > 4] == 0),
+    EXCEPT for the rare n-gon whose only available decomposition would
+    collide with pre-existing mesh topology (see
+    _sub_faces_collide_with_existing_topology) - those are left as n-gons
+    rather than risk introducing a non-manifold edge, which is the more
+    serious defect. Decomposes N-gons keeping lines straight onto straight
+    edges using ONLY existing vertices (never creating T-junctions,
+    dangling edges, or holes).
     """
     mesh.fix_winding_consistency()
     ngon_fids = [f for f in list(mesh.faces) if len(mesh.face_verts(f)) > 4]
     ngons_resolved = 0
+    ngons_skipped_collision = 0
     straight_quads_count = 0
 
     for fid in ngon_fids:
@@ -471,6 +516,9 @@ def resolve_all_ngons(mesh, angle_shape_deg=90.0):
 
         sub_faces = decompose_polygon_existing_verts(pts_2d, fverts)
         if sub_faces:
+            if _sub_faces_collide_with_existing_topology(mesh, fverts, sub_faces, fid):
+                ngons_skipped_collision += 1
+                continue
             mesh.remove_face(fid)
             for ftype, vtuple in sub_faces:
                 p_a, p_b, p_c = (
@@ -503,6 +551,7 @@ def resolve_all_ngons(mesh, angle_shape_deg=90.0):
     return {
         "ngons_initial": len(ngon_fids),
         "ngons_resolved": ngons_resolved,
+        "ngons_skipped_collision": ngons_skipped_collision,
         "straight_quads": straight_quads_count,
         "pairs_merged": pair_stats.get("pairs_merged", 0),
         "tris_after": pair_stats.get("tris_after", 0),

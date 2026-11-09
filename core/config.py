@@ -28,6 +28,7 @@ _ENGINE_ROOT = os.path.dirname(_THIS_DIR)
 # quadriflow is the already-proven, stable fallback used successfully in
 # tripo-logic-approach-v2.
 INSTANT_MESHES_CANDIDATES = [
+    os.path.join(_ENGINE_ROOT, "bin", "instant_meshes"),
     "/Users/bhargavreddy/Downloads/bhargav's one/tools/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "/Applications/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "instant-meshes",
@@ -77,6 +78,17 @@ MICRO_FEATURE_AREA_FRAC = 0.15   # fraction of LOCAL (per-component) median face
 DOME_SADDLE_DEG = 28.0       # mean face-normal deviation threshold for pole/dome vertices
 COPLANAR_DART_DEG = 24.0     # triangle-pair coplanarity threshold for dart merging
 PLANAR_STRAIGHTEN_DEG = 3.0  # lattice-straightening coplanarity gate
+
+# core/dome_caps.py classification — divergence of adjacent-face mean normal
+# from the loop's own fitted-plane normal; NOT the same metric as
+# DOME_SADDLE_DEG above (that's a per-vertex interior-pole angle-deviation
+# gate used by protect.py during dissolve, a different unit/purpose).
+CAP_CURVATURE_DIVERGENCE = 0.1   # |dot(avg_adj_normal, loop_normal)| above this => dome/saddle, else flat
+CAP_DOME_HEIGHT_FRAC = 0.35      # elevation as a fraction of loop r_mean
+CAP_DOME_NUM_RINGS = 3
+CAP_DOME_CORE_FRAC = 0.45
+CAP_DOME_PROFILE = "spherical"
+CAP_DOME_MIN_RADIUS_EDGE_MULT = 0.25  # skip dome path if loop r_mean < this * local median edge length
 
 
 def validate_environment():

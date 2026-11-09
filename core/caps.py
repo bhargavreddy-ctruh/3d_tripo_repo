@@ -23,6 +23,7 @@ import numpy as np
 
 import io_mesh
 from editmesh import EditMesh
+import dome_caps
 
 
 def _is_planar(coords, tol_frac=0.02):
@@ -72,7 +73,12 @@ def cap_boundary_loop(mesh, loop_edges, inset_frac=0.88):
     coords = [mesh.vert_co(v).copy() for v in verts]
     planar, centroid, normal = _is_planar(coords)
     if not planar:
-        return {"ok": False, "reason": "not planar enough"}
+        # Curved (dome/saddle) boundary loop: route to the curvature-sign-
+        # aware quad-dome/socket capper instead of leaving it open. Report
+        # its own ok/reason verbatim rather than masking as "not planar
+        # enough" — a rejection here (e.g. its own aspect-ratio guard) is a
+        # distinct, more specific failure mode.
+        return dome_caps.cap_dome_saddle_loop(mesh, loop_edges, verts, coords)
 
     # Guard: skip long skinny boundary slits to prevent creating 1D barcode slats
     t1 = np.cross(normal, [0, 0, 1]) if abs(normal[2]) < 0.9 else np.cross(normal, [1, 0, 0])
