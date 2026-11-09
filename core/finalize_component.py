@@ -18,7 +18,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import io_mesh
-import dissolve
 import darts
 import coplanar_merge
 import caps
@@ -67,26 +66,18 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
 
     stage_errors = {}
 
-    # 1. Strict full-line pairwise quad simplification (preserves 100% quads and edge flow)
-    dissolve_stats = None
-    try:
-        dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes, max_flat_deg=12.0)
-    except Exception as e:
-        stage_errors["dissolve"] = str(e)
-        mesh = io_mesh.load(remeshed_obj)
-
-    # 2. Triangle-pair merge (turns coplanar triangles into clean quads so loop traversal can walk through them)
+    # 1. Triangle-pair merge (turns coplanar triangles into clean quads so ribbon traversal walks through them)
     darts_stats = None
     try:
         darts_stats = darts.merge_coplanar_triangle_pairs(mesh, angle_face_deg=18.0)
     except Exception as e:
         stage_errors["darts"] = str(e)
 
-    # 3. Pull 3 Coplanar Region Merging: merges planar clusters into minimal clean faces
-    # (eliminates all interior diagonal chords and redundant edges across flat surfaces)
+    # 2. Structured Coplanar Ribbon Reduction: reduces planar & nearly-flat regions along (u, v) ribbons
+    # (guarantees 100% clean quads and structured transition triangles, zero n-gons)
     coplanar_merge_stats = None
     try:
-        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh, angle_tol_deg=10.0)
+        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh, angle_tol_deg=14.0)
     except Exception as e:
         stage_errors["coplanar_merge"] = str(e)
 
@@ -147,9 +138,8 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
             pass
 
     return {
-        "dissolve": dissolve_stats,
         "darts": darts_stats,
-        "coplanar_merge": coplanar_merge_stats,
+        "coplanar_reduction": coplanar_merge_stats,
         "collinear_cleanup": collinear_cleanup_stats,
         "caps": caps_results,
         "fix_winding": winding_fix_stats,
