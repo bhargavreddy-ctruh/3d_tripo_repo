@@ -28,53 +28,117 @@ import math
 import os
 import sys
 import time
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 
 import io_mesh
+import darts
 
 
 def trace_ribbon_transverse_line(mesh, start_e, creases, flat_edges):
-    if start_e not in flat_edges or mesh.is_boundary(start_e):
+    """Traces a transverse chord through quads across flat_edges,
+    stopping cleanly when hitting creases or boundaries.
+    """
+    if start_e not in flat_edges or mesh.is_boundary(start_e) or start_e not in mesh._edge_faces:
         return None
 
-    def step_to_seam(curr_e, curr_v):
+    def step_dir(curr_e, curr_v):
         loop = [curr_e]
         e = curr_e
         v = curr_v
         visited_v = {v}
         while True:
             edges = list(mesh.link_edges(v))
-            if any(ed in creases for ed in edges) or len(edges) != 4 or mesh.is_boundary(e):
-                return loop, True
+            if any(ed in creases for ed in edges) or mesh.is_boundary(e):
+                return loop, 'crease'
             in_faces = set(mesh.link_faces(e))
             nxt = None
-            for cand in edges:
-                if cand != e and cand in flat_edges and not (set(mesh.link_faces(cand)) & in_faces):
-                    nxt = cand
-                    break
+            if len(edges) == 4:
+                for cand in edges:
+                    if cand != e and cand in flat_edges and not (set(mesh.link_faces(cand)) & in_faces):
+                        nxt = cand
+                        break
+            elif len(edges) in (3, 5):
+                # Extraordinary pole: check tangent alignment to continue straight
+                v_prev = mesh.other_vert(e, v)
+                t_in = mesh.vert_co(v) - mesh.vert_co(v_prev)
+                l_in = np.linalg.norm(t_in)
+                if l_in > 1e-9:
+                    t_in_u = t_in / l_in
+                    best_cos = math.cos(math.radians(20.0))
+                    for cand in edges:
+                        if cand == e or cand not in flat_edges: continue
+                        if set(mesh.link_faces(cand)) & in_faces: continue
+                        v_next = mesh.other_vert(cand, v)
+                        t_out = mesh.vert_co(v_next) - mesh.vert_co(v)
+                        l_out = np.linalg.norm(t_out)
+                        if l_out > 1e-9 and np.dot(t_in_u, t_out / l_out) > best_cos:
+                            best_cos = np.dot(t_in_u, t_out / l_out)
+                            nxt = cand
+            else:
+                return loop, 'dead_end'
+
             if nxt is None:
-                return loop, True
+                if len(edges) in (3, 5):
+                    return loop, 'pole'
+                return loop, 'dead_end'
+
             other_v = mesh.other_vert(nxt, v)
             if other_v in visited_v:
-                return loop, True
+                return loop, 'closed'
             loop.append(nxt)
             visited_v.add(other_v)
             e = nxt
             v = other_v
-            if len(loop) > 30:
-                return loop, False
+            if len(loop) > 150:
+                return loop, 'dead_end'
 
     v0, v1 = mesh.edge_verts(start_e)
-    back_loop, back_ok = step_to_seam(start_e, v0)
-    fwd_loop, fwd_ok = step_to_seam(start_e, v1)
-
-    if not (back_ok and fwd_ok):
+    back_loop, back_stat = step_dir(start_e, v0)
+    if back_stat == 'closed':
+        return back_loop
+    if back_stat == 'dead_end':
         return None
 
-    return list(reversed(back_loop[1:])) + [start_e] + fwd_loop[1:]
+    fwd_loop, fwd_stat = step_dir(start_e, v1)
+    if fwd_stat == 'closed':
+        return fwd_loop
+    if fwd_stat == 'dead_end':
+        return None
+
+    full_line = list(reversed(back_loop[1:])) + [start_e] + fwd_loop[1:]
+    return full_line
+
+
+def is_clean_chord_termination(mesh, line, creases, max_bnd_dev_deg=25.0):
+    all_verts = []
+    for ed in line:
+        all_verts.extend(mesh.edge_verts(ed))
+    v_cnt = Counter(all_verts)
+    endpoints = [v for v, count in v_cnt.items() if count == 1]
+    if len(endpoints) == 0:
+        return True # closed ring
+    for ep in endpoints:
+        ep_edges = list(mesh.link_edges(ep))
+        c_edges = [ed for ed in ep_edges if ed in creases or mesh.is_boundary(ed)]
+        if len(c_edges) >= 2:
+            v_a = mesh.other_vert(c_edges[0], ep)
+            v_b = mesh.other_vert(c_edges[1], ep)
+            t_a = mesh.vert_co(ep) - mesh.vert_co(v_a)
+            t_b = mesh.vert_co(v_b) - mesh.vert_co(ep)
+            l_a, l_b = np.linalg.norm(t_a), np.linalg.norm(t_b)
+            if l_a > 1e-9 and l_b > 1e-9:
+                cos_ang = np.clip(np.dot(t_a/l_a, t_b/l_b), -1.0, 1.0)
+                dev = np.degrees(np.arccos(cos_ang))
+                if dev <= max_bnd_dev_deg or len(c_edges) >= 3:
+                    continue
+        if len(ep_edges) == 3 and len(c_edges) == 0:
+            continue
+        return False
+    return True
 
 
 def detect_feature_collar_creases(mesh, angle_tol_deg=4.0):
@@ -192,86 +256,131 @@ def detect_feature_collar_creases(mesh, angle_tol_deg=4.0):
     return protected_edges
 
 
-def merge_ribbon_lines(mesh, max_passes=20, crease_deg=18.0, flat_deg=12.0, ar_gate=8.0):
+def merge_ribbon_lines(mesh, max_passes=12, crease_deg=18.0, flat_deg=14.0, ar_gate=3.5, min_patch_size=120):
+    """Reduces coplanar faces along (u, v) quad ribbons while strictly protecting
+    orthogonal edge flow, creases, and small feature patches (e.g. scales, eye medallion).
+    """
     crease_rad = math.radians(crease_deg)
     flat_rad = math.radians(flat_deg)
-    feature_creases = detect_feature_collar_creases(mesh, angle_tol_deg=flat_deg)
+    ref_dir = np.array([1.0, 0.0, 0.0])
     total_dissolved = 0
 
-    for pass_idx in range(max_passes):
-        creases = set(feature_creases)
+    for p in range(max_passes):
+        creases = set()
         flat_edges = set()
         for e in mesh.edges:
             if mesh.is_boundary(e):
                 creases.add(e)
                 continue
-            lf = mesh.link_faces(e)
+            lf = list(mesh.link_faces(e))
             if len(lf) != 2:
                 creases.add(e)
                 continue
-            n0 = mesh.face_normal(lf[0])
-            n1 = mesh.face_normal(lf[1])
-            cos_a = float(np.clip(np.dot(n0, n1), -1.0, 1.0))
-            ang = math.acos(cos_a)
+            n0, n1 = mesh.face_normal(lf[0]), mesh.face_normal(lf[1])
+            ang = math.acos(float(np.clip(np.dot(n0, n1), -1.0, 1.0)))
             if ang >= crease_rad:
                 creases.add(e)
-            elif ang <= flat_rad and e not in creases:
+            elif ang <= flat_rad:
                 flat_edges.add(e)
 
+        # Connected component patch sizing
+        face_patch = {}
+        patch_id = 0
+        for start_f in mesh.faces:
+            if start_f in face_patch:
+                continue
+            q = [start_f]
+            face_patch[start_f] = patch_id
+            while q:
+                curr = q.pop()
+                for ed in mesh.face_edges(curr):
+                    if ed in creases or ed not in flat_edges:
+                        continue
+                    for nxt in mesh.link_faces(ed):
+                        if nxt not in face_patch:
+                            face_patch[nxt] = patch_id
+                            q.append(nxt)
+            patch_id += 1
+
+        patch_sizes = Counter(face_patch.values())
+        protected_faces = set(f for f, pid in face_patch.items() if patch_sizes[pid] < min_patch_size)
+        protected_edges = set()
+        for f in protected_faces:
+            for e in mesh.face_edges(f):
+                protected_edges.add(e)
+
+        target_axis = p % 2
         candidates = sorted(
-            list(flat_edges),
+            [e for e in flat_edges if e in mesh._edge_faces and e not in protected_edges],
             key=lambda e: min(mesh.calc_area(f) for f in mesh.link_faces(e))
         )
-        valid_lines = []
-        visited = set()
+
+        visited_faces = set()
+        accepted_lines = []
+
         for e in candidates:
-            if e in visited:
+            if any(f in visited_faces for f in mesh.link_faces(e)):
                 continue
             line = trace_ribbon_transverse_line(mesh, e, creases, flat_edges)
-            if line:
-                # Check aspect ratio gate for each candidate line
-                ar_ok = True
-                for le in line:
-                    lf = mesh.link_faces(le)
-                    if len(lf) != 2:
-                        continue
-                    v_a, v_b = mesh.edge_verts(le)
-                    w = float(np.linalg.norm(mesh.vert_co(v_b) - mesh.vert_co(v_a)))
-                    if w < 1e-9:
-                        continue
-                    h = (mesh.calc_area(lf[0]) + mesh.calc_area(lf[1])) / max(w, 1e-9)
-                    ar = max(w, h) / max(min(w, h), 1e-7)
-                    if ar > ar_gate:
-                        ar_ok = False
-                        break
-                if ar_ok:
-                    valid_lines.append(line)
-                    for le in line:
-                        visited.add(le)
-
-        if not valid_lines:
-            break
-
-        used_faces = set()
-        accepted_lines = []
-        for line in valid_lines:
-            faces = set()
-            for le in line:
-                faces.update(mesh.link_faces(le))
-            if faces & used_faces:
+            if not line or len(line) < 2:
                 continue
-            used_faces |= faces
-            accepted_lines.append(line)
 
-        dissolved = 0
+            if any(any(f in protected_faces for f in mesh.link_faces(le)) for le in line):
+                continue
+
+            if not is_clean_chord_termination(mesh, line, creases, max_bnd_dev_deg=25.0):
+                continue
+
+            v_start, v_end = mesh.edge_verts(line[0])[0], mesh.edge_verts(line[-1])[1]
+            line_vec = mesh.vert_co(v_end) - mesh.vert_co(v_start)
+            norm_lv = np.linalg.norm(line_vec)
+            if norm_lv > 1e-6:
+                line_dir = line_vec / norm_lv
+                align = abs(float(np.dot(line_dir, ref_dir)))
+                axis = 0 if align >= 0.7071 else 1
+                if axis != target_axis and p < 8:
+                    continue
+
+            ar_ok = True
+            for le in line:
+                lf = list(mesh.link_faces(le))
+                if len(lf) != 2:
+                    continue
+                v0, v1 = mesh.edge_verts(le)
+                w = float(np.linalg.norm(mesh.vert_co(v1) - mesh.vert_co(v0)))
+                if w < 1e-9:
+                    continue
+                h = (mesh.calc_area(lf[0]) + mesh.calc_area(lf[1])) / max(w, 1e-9)
+                ar = max(w, h) / max(min(w, h), 1e-7)
+                if ar > ar_gate:
+                    ar_ok = False
+                    break
+            if not ar_ok:
+                continue
+
+            line_faces = set()
+            valid = True
+            for le in line:
+                for lf in mesh.link_faces(le):
+                    if lf in visited_faces:
+                        valid = False
+                        break
+                    line_faces.add(lf)
+                if not valid:
+                    break
+            if valid:
+                accepted_lines.append(line)
+                visited_faces.update(line_faces)
+
+        pass_dissolved = 0
         for line in accepted_lines:
             if not all(le in mesh._edge_faces for le in line):
                 continue
-            merged_edge_verts = set()
+            merged_verts = set()
             for le in line:
                 if le not in mesh._edge_faces:
                     continue
-                lf = mesh.link_faces(le)
+                lf = list(mesh.link_faces(le))
                 if len(lf) != 2:
                     continue
                 f0, f1 = lf[0], lf[1]
@@ -280,18 +389,18 @@ def merge_ribbon_lines(mesh, max_passes=20, crease_deg=18.0, flat_deg=12.0, ar_g
                 v0, v1 = mesh.edge_verts(le)
                 new_f = mesh.merge_faces([f0, f1], dissolve_verts=False)
                 if new_f is not None:
-                    merged_edge_verts.add(v0)
-                    merged_edge_verts.add(v1)
+                    merged_verts.add(v0)
+                    merged_verts.add(v1)
 
-            valid_verts = [v for v in merged_edge_verts if v in mesh._vert_co]
-            if valid_verts:
-                mesh.dissolve_collinear_verts(valid_verts, angle_tol_deg=10.0)
-            if merged_edge_verts:
-                dissolved += 1
+            v_to_dissolve = [v for v in merged_verts if v in mesh._vert_co]
+            if v_to_dissolve:
+                mesh.dissolve_collinear_verts(v_to_dissolve, angle_tol_deg=20.0)
+            pass_dissolved += 1
 
-        total_dissolved += dissolved
-        if dissolved == 0:
+        total_dissolved += pass_dissolved
+        if pass_dissolved == 0 and p >= 8:
             break
+
     return total_dissolved
 
 
@@ -409,52 +518,16 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
     n_faces_before = len(list(mesh.faces))
 
     t_ribbons0 = time.perf_counter()
-    n_ribbons_dissolved = merge_ribbon_lines(mesh, max_passes=6, crease_deg=18.0, flat_deg=4.0)
+    n_ribbons_dissolved = merge_ribbon_lines(
+        mesh, max_passes=12, crease_deg=18.0, flat_deg=14.0, ar_gate=3.5, min_patch_size=60
+    )
     t_ribbons = time.perf_counter()
-    print(f"[coplanar_merge] ribbon_lines_merge={t_ribbons-t_ribbons0:.2f}s "
+    print(f"[coplanar_merge] structured_ribbon_reduction={t_ribbons-t_ribbons0:.2f}s "
           f"({n_ribbons_dissolved} lines dissolved)", flush=True)
 
-    clusters = find_coplanar_clusters(mesh, angle_tol_deg=angle_tol_deg)
-    multi_face_clusters = [c for c in clusters if len(c) > 1]
-    t_flood_fill = time.perf_counter()
-    print(f"[coplanar_merge] recalc_normals={t_normals-t0:.2f}s "
-          f"flood_fill={t_flood_fill-t_normals:.2f}s "
-          f"({len(clusters)} clusters, {len(multi_face_clusters)} multi-face, "
-          f"largest={max((len(c) for c in multi_face_clusters), default=0)})",
-          flush=True)
-
-    n_merged = 0
-    n_skipped_non_disk = 0
-    for cluster in multi_face_clusters:
-        valid_faces = [f for f in cluster if f in mesh._face_verts]
-        if len(valid_faces) < 2:
-            continue
-        # merge_faces(dissolve_verts=False) deliberately never removes a
-        # vertex: if a cluster vertex is ALSO used by a face OUTSIDE this
-        # cluster (common at a T-junction where 3+ faces meet but not all
-        # are in the cluster), removing it would corrupt that other face.
-        # With dissolve_verts=False no vertex is ever touched, so the only
-        # edges removed are the cluster's own strictly-internal ones (never
-        # a boundary edge by construction) — provably safe. merge_faces
-        # also folds in the disk-topology safety check itself (returns
-        # None, mutating nothing, if the cluster's boundary isn't exactly
-        # one simple loop — an annulus/branching/multiply-connected cluster
-        # would otherwise create a real hole).
-        new_fid = mesh.merge_faces(valid_faces, dissolve_verts=False)
-        if new_fid is not None:
-            n_merged += 1
-        else:
-            n_skipped_non_disk += 1
-
-    # For non-disk clusters (regions with internal holes/features/tufting):
-    # Pairwise merge coplanar face pairs so large clean panels form around features
-    n_pairwise_merged = 0
-    if n_skipped_non_disk > 0:
-        n_pairwise_merged = _merge_non_disk_cluster_pairs(mesh, angle_tol_deg=angle_tol_deg, max_dev=0.005)
-
-    t_dissolve = time.perf_counter()
-    print(f"[coplanar_merge] dissolve_faces_loop={t_dissolve-t_flood_fill:.2f}s "
-          f"({n_merged} disk merged, {n_pairwise_merged} pairwise non-disk merged)", flush=True)
+    # Resolve any residual transition n-gons into clean quads and coplanar triangle pairs
+    darts.resolve_all_ngons(mesh)
+    darts.merge_coplanar_triangle_pairs(mesh, angle_face_deg=18.0)
 
     n_collinear_removed = 0
     if collapse_collinear:
@@ -462,7 +535,7 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
         n_collinear_removed = mesh.dissolve_collinear_verts(
             all_verts, angle_tol_deg=collinear_angle_tol_deg)
     t_collinear = time.perf_counter()
-    print(f"[coplanar_merge] collinear_cleanup={t_collinear-t_dissolve:.2f}s "
+    print(f"[coplanar_merge] collinear_cleanup={t_collinear-t_ribbons:.2f}s "
           f"({n_collinear_removed} removed)", flush=True)
 
     n_boundary_after = len(mesh.boundary_edges())
@@ -474,11 +547,7 @@ def merge_coplanar_regions(mesh, angle_tol_deg=2.0, collapse_collinear=False,
         )
 
     return {
-        "clusters_found": len(clusters),
-        "multi_face_clusters": len(multi_face_clusters),
-        "clusters_merged": n_merged,
-        "clusters_skipped_non_disk": n_skipped_non_disk,
-        "clusters_skipped_exception": 0,
+        "ribbon_lines_dissolved": n_ribbons_dissolved,
         "collinear_verts_removed": n_collinear_removed,
         "faces_before": n_faces_before,
         "faces_after": len(list(mesh.faces)),
