@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.so
+.DS_Store
+
+# Input assets (large binary GLB/OBJ files — keep locally, don't commit)
+assets/
+
+# External binaries (Instant Meshes, etc.)
+bin/
+
+# Pipeline intermediate and output files
+outputs/*/
+!outputs/examples/
+
+# Test cache
+tests/__pycache__/
