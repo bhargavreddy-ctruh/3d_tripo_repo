@@ -1,10 +1,10 @@
 """Per-vertex curvature field on the dense input mesh.
 
-Runs under system python3 (needs trimesh + libigl — NOT available in
-Blender's bundled python, confirmed 2026-11-01). Accepts any format
-trimesh can load directly (.obj, .glb/.gltf, .ply, .stl). For .fbx inputs,
-the caller must first export an intermediate .obj via io_blender.py
-(trimesh cannot reliably parse FBX — established earlier this project).
+Runs under plain system python3 (needs trimesh + libigl). Accepts any
+format trimesh can load directly (.obj, .glb/.gltf, .ply, .stl). FBX is
+not supported by this pipeline's pure-Python backend (trimesh cannot
+reliably parse FBX, and there is no Blender dependency left to fall back
+on) — pre-convert .fbx assets to .obj/.glb first.
 
 This is the one piece none of the three prior efforts (tripo_smart_engine,
 tripo-logic-approach(-v2), burger_stand_retopo.py) has: a real, continuous,

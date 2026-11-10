@@ -26,8 +26,7 @@ and [`PROGRESS.md`](PROGRESS.md) for the task-by-task build history.
    flood-fill region merging.
 6. **`caps.py`** — parallel-chord quad caps for planar circular/polygonal
    boundaries (eliminates triangle-fan pole singularities).
-7. **`fix_winding.py`** — BMesh-native, quad/n-gon-preserving winding-
-   consistency repair.
+7. **`fix_winding.py`** — quad/n-gon-preserving winding-consistency repair.
 8. **`reproject.py`** — CAD-surface reprojection back onto the original
    dense input.
 9. **`audit.py`** — forensic topology metrics (quad%, valence-4%, boundary
@@ -37,9 +36,24 @@ and [`PROGRESS.md`](PROGRESS.md) for the task-by-task build history.
 ## Usage
 
 ```bash
-python3 core/pipeline.py <input.glb|.fbx|.obj> <out_dir>
+python3 core/pipeline.py <input.glb|.obj> <out_dir>
 ```
 
-Requires Blender (for `bpy`/`bmesh`) and system Python 3 with `trimesh`
-and `libigl` for curvature/decimation. See `core/config.py` for binary
-path resolution.
+**No Blender dependency at all** — not the desktop app, not the `bpy` pip
+module, not even as a subprocess. Every mesh operation (import/export,
+dissolve, triangle-pair merging, coplanar-region merging, boundary
+capping, winding repair, reprojection) is implemented directly on
+`core/editmesh.py`'s own mutable polygon-mesh structure (numpy-based,
+preserves quads/n-gons — unlike `trimesh.Trimesh`, which is triangle-only)
+plus `trimesh`/`libigl` for curvature, remeshing's external binaries, and
+decimation. See `core/io_mesh.py` for the OBJ/GLB/GLTF I/O layer and
+`core/config.py` for remesher binary path resolution.
+
+Only `.obj`/`.glb`/`.gltf` inputs are supported — **FBX is not supported
+by this pipeline**. There is no pure-Python FBX reader/writer wired up
+(trimesh can't reliably parse FBX either); pre-convert `.fbx` assets to
+`.obj`/`.glb` before running the pipeline.
+
+Dependencies: `numpy`, `trimesh`, `igl` (`python3 -m pip install numpy
+trimesh libigl`). No GPU, no Blender install, no matching-version pip
+wheel to track.

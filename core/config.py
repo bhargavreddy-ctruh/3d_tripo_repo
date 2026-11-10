@@ -16,11 +16,11 @@ _ENGINE_ROOT = os.path.dirname(_THIS_DIR)
 # ---------------------------------------------------------------------------
 # Binaries
 # ---------------------------------------------------------------------------
-
-BLENDER_CANDIDATES = [
-    "/Applications/Blender.app/Contents/MacOS/Blender",
-    "blender",
-]
+#
+# No Blender dependency: this pipeline is pure Python (EditMesh/io_mesh,
+# trimesh, igl) end to end — see io_mesh.py's docstring. The only external
+# binaries left are the field-aligned remeshers below (FBX input is not
+# supported by this backend; pre-convert to .obj/.glb first).
 
 # Instant Meshes found on this machine; known to have crashed repeatedly in
 # GUI mode previously (see ~/Library/Logs/DiagnosticReports), but the CLI
@@ -28,6 +28,8 @@ BLENDER_CANDIDATES = [
 # quadriflow is the already-proven, stable fallback used successfully in
 # tripo-logic-approach-v2.
 INSTANT_MESHES_CANDIDATES = [
+    os.path.join(_ENGINE_ROOT, "bin", "instant_meshes"),
+    "/Users/bhargavreddy/vacuum_quad_engine/bin/instant_meshes",
     "/Users/bhargavreddy/Downloads/bhargav's one/tools/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "/Applications/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "instant-meshes",
@@ -49,7 +51,6 @@ def _first_existing(candidates):
     return None
 
 
-BLENDER_BIN = _first_existing(BLENDER_CANDIDATES)
 INSTANT_MESHES_BIN = _first_existing(INSTANT_MESHES_CANDIDATES)
 QUADRIFLOW_BIN = _first_existing(QUADRIFLOW_CANDIDATES)
 
@@ -83,17 +84,18 @@ PLANAR_STRAIGHTEN_DEG = 3.0  # lattice-straightening coplanarity gate
 def validate_environment():
     """Raise RuntimeError listing anything missing, else return True."""
     missing = []
-    if not BLENDER_BIN:
-        missing.append("Blender")
     if not INSTANT_MESHES_BIN and not QUADRIFLOW_BIN:
         missing.append("Instant Meshes or quadriflow (need at least one remesher)")
+    try:
+        import trimesh, igl, numpy  # noqa: F401  (presence check only)
+    except ImportError as e:
+        missing.append(f"a required pure-Python dependency ({e})")
     if missing:
         raise RuntimeError(f"Missing required binaries: {', '.join(missing)}")
     return True
 
 
 if __name__ == "__main__":
-    print("BLENDER_BIN        =", BLENDER_BIN)
     print("INSTANT_MESHES_BIN =", INSTANT_MESHES_BIN)
     print("QUADRIFLOW_BIN     =", QUADRIFLOW_BIN)
     print("DEFAULT_REMESH_BACKEND =", DEFAULT_REMESH_BACKEND)

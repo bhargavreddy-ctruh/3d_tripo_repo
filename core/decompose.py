@@ -3,11 +3,11 @@ its own OBJ — the direct fix for tripo_smart_engine's decomposer.py, which
 joins every part into ONE object before remeshing (the root cause of its
 global target_faces / global micro-feature-median bugs).
 
-Runs under Blender (`blender --background --python decompose.py -- <in> <out_dir>`).
-Each component keeps its own curvature field computed independently by
+Pure Python (trimesh connected-components, no Blender of any kind). Each
+component keeps its own curvature field computed independently by
 curvature.py downstream (run on that component's OBJ alone) — this is the
 simplest correct way to make sizing/protection genuinely local without
-needing to reconcile vertex ordering between bpy and trimesh/igl.
+needing to reconcile vertex ordering between different libraries.
 """
 
 import json
@@ -16,47 +16,54 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import bpy
-import bmesh
-
-import io_blender
+import io_mesh
 
 
 def decompose_to_components(input_path, out_dir):
     """Import input_path, split into loose connected components, export each
-    as its own OBJ in out_dir. Returns a manifest list of dicts."""
-    io_blender.clear_scene()
-    mesh_objs = io_blender.import_mesh(input_path)
+    as its own triangulated OBJ in out_dir. Returns (manifest, manifest_path)."""
+    mesh = io_mesh.load_dense_input(input_path)
+    vertices, faces, _ = mesh.to_arrays()
 
-    # Join multi-object imports into one object first ONLY so we can run a
-    # single loose-parts separation; this is NOT the same bug as
-    # tripo_smart_engine's decomposer.py, because the join here is
-    # immediately undone by the loose-parts split below — the end state is
-    # always N separate component objects, never one joined mesh carried
-    # forward into remeshing.
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in mesh_objs:
-        o.select_set(True)
-    bpy.context.view_layer.objects.active = mesh_objs[0]
-    if len(mesh_objs) > 1:
-        bpy.ops.object.join()
-    target = bpy.context.active_object
+    # Connected-component labeling over the face-adjacency graph (shared
+    # vertex), the exact equivalent of Blender's "separate by loose parts".
+    n = len(vertices)
+    parent = list(range(n))
 
-    bpy.ops.object.mode_set(mode="EDIT")
-    bpy.ops.mesh.select_all(action="SELECT")
-    bpy.ops.mesh.separate(type="LOOSE")
-    bpy.ops.object.mode_set(mode="OBJECT")
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-    components = [o for o in bpy.data.objects if o.type == "MESH"]
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for f in faces:
+        for i in range(1, len(f)):
+            union(f[0], f[i])
+
+    groups = {}
+    for fi, f in enumerate(faces):
+        root = find(f[0])
+        groups.setdefault(root, []).append(fi)
 
     os.makedirs(out_dir, exist_ok=True)
     manifest = []
     base_name = os.path.splitext(os.path.basename(input_path))[0]
-    for i, obj in enumerate(components):
-        stats = io_blender.get_object_stats(obj)
+    for i, (_root, face_indices) in enumerate(sorted(groups.items())):
+        used_verts = sorted({v for fi in face_indices for v in faces[fi]})
+        remap = {v: j for j, v in enumerate(used_verts)}
+        comp_vertices = [vertices[v] for v in used_verts]
+        comp_faces = [tuple(remap[v] for v in faces[fi]) for fi in face_indices]
+        comp_mesh = io_mesh.EditMesh.from_arrays(comp_vertices, comp_faces)
+
         comp_path = os.path.join(out_dir, f"{base_name}__comp{i:04d}.obj")
-        io_blender.export_mesh(comp_path, objects=[obj], quads=False)
-        diag = io_blender.bounding_box_diagonal([obj])
+        io_mesh.export(comp_path, comp_mesh, quads=False)
+        diag = comp_mesh.bounding_box_diagonal()
+        stats = io_mesh.get_object_stats(comp_mesh, name=f"comp{i:04d}")
         manifest.append({
             "index": i,
             "path": comp_path,
@@ -72,10 +79,9 @@ def decompose_to_components(input_path, out_dir):
 
 
 if __name__ == "__main__":
-    argv = sys.argv
-    args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
+    args = sys.argv[1:]
     if len(args) < 2:
-        print("Usage: blender --background --python decompose.py -- <input_file> <out_dir>")
+        print("Usage: python3 decompose.py <input_file> <out_dir>")
         sys.exit(1)
 
     manifest, manifest_path = decompose_to_components(args[0], args[1])

@@ -1,9 +1,7 @@
 """Forensic topology audit — ported from tripo_smart_engine's audit.py
 (already verified accurate by this project's own earlier research pass).
-Same metrics, same formulas; reimplemented against this project's
-`io_blender` helpers instead of a separately embedded Blender script, so it
-shares the same import/bmesh conventions as the rest of vacuum_quad_engine.
-Runs under Blender (bpy/bmesh).
+Same metrics, same formulas, reimplemented on top of EditMesh/io_mesh
+instead of bpy/bmesh — pure Python, no Blender.
 """
 
 import json
@@ -13,80 +11,58 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import bpy
-import bmesh
 import numpy as np
 
-import io_blender
-
-
-def _count_islands_all(mesh_objs):
-    total = 0
-    for o in mesh_objs:
-        bm = bmesh.new()
-        bm.from_mesh(o.data)
-        total += io_blender._count_islands(bm)
-        bm.free()
-    return total
+import io_mesh
 
 
 def audit_mesh(filepath):
-    io_blender.clear_scene()
-    mesh_objs = io_blender.import_mesh(filepath)
-    if not mesh_objs:
-        return {"error": "No mesh objects found", "path": filepath}
+    mesh = io_mesh.load(filepath)
+    if not list(mesh.faces):
+        return {"error": "No mesh faces found", "path": filepath}
 
-    total_islands = _count_islands_all(mesh_objs)
+    total_islands = mesh.count_islands()
+    total_f = len(list(mesh.faces))
+    total_v = len(list(mesh.verts))
+    total_e = len(list(mesh.edges))
 
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in mesh_objs:
-        o.select_set(True)
-    bpy.context.view_layer.objects.active = mesh_objs[0]
-    if len(mesh_objs) > 1:
-        bpy.ops.object.join()
-    obj = bpy.context.active_object
+    quads = [f for f in mesh.faces if len(mesh.face_verts(f)) == 4]
+    tris = [f for f in mesh.faces if len(mesh.face_verts(f)) == 3]
+    ngons = [f for f in mesh.faces if len(mesh.face_verts(f)) > 4]
 
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    bm.faces.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
-
-    total_f = len(bm.faces)
-    total_v = len(bm.verts)
-    total_e = len(bm.edges)
-
-    quads = [f for f in bm.faces if len(f.verts) == 4]
-    tris = [f for f in bm.faces if len(f.verts) == 3]
-    ngons = [f for f in bm.faces if len(f.verts) > 4]
-
-    boundary_edges = [e for e in bm.edges if e.is_boundary]
-    non_manifold_edges = [e for e in bm.edges if len(e.link_faces) > 2]
+    boundary_edges = mesh.boundary_edges()
+    non_manifold_edges = mesh.non_manifold_edges()
 
     aspects = []
     parallelisms = []
     for q in quads:
-        vs = [v.co for v in q.verts]
+        vs = [mesh.vert_co(v) for v in mesh.face_verts(q)]
         e0 = vs[1] - vs[0]
         e1 = vs[2] - vs[1]
         e2 = vs[3] - vs[2]
         e3 = vs[0] - vs[3]
-        l0, l1, l2, l3 = e0.length, e1.length, e2.length, e3.length
+        l0, l1, l2, l3 = (float(np.linalg.norm(e)) for e in (e0, e1, e2, e3))
         u = 0.5 * (l0 + l2)
         v_l = 0.5 * (l1 + l3)
         ar = max(u, v_l) / max(min(u, v_l), 1e-6)
         aspects.append(ar)
         if l0 > 1e-6 and l2 > 1e-6:
-            parallelisms.append(abs(e0.normalized().dot(e2.normalized())))
+            parallelisms.append(abs(float(np.dot(e0 / l0, e2 / l2))))
 
-    valences = [len(v.link_edges) for v in bm.verts if not v.is_boundary]
+    valences = [mesh.valence(v) for v in mesh.verts if not any(
+        mesh.is_boundary(e) for e in mesh.link_edges(v))]
     val_c = Counter(valences)
     val4_pct = (val_c[4] / max(len(valences), 1)) * 100.0
 
     tris_set = set(tris)
     tri_paired = 0
     for t in tris:
-        if any(lf in tris_set for e in t.edges for lf in e.link_faces if lf != t):
+        is_paired = False
+        for e in mesh.face_edges(t):
+            for lf in mesh.link_faces(e):
+                if lf != t and lf in tris_set:
+                    is_paired = True
+        if is_paired:
             tri_paired += 1
     tri_paired_pct = (tri_paired / max(len(tris), 1)) * 100.0
 
@@ -114,7 +90,6 @@ def audit_mesh(filepath):
         "ar_5_to_20": round(sum(1 for a in aspects if 5.0 <= a < 20.0) / max(len(aspects), 1) * 100.0, 1),
         "ar_over_20": round(sum(1 for a in aspects if a >= 20.0) / max(len(aspects), 1) * 100.0, 1),
     }
-    bm.free()
     return stats
 
 
@@ -135,10 +110,9 @@ def print_audit_report(stats):
 
 
 if __name__ == "__main__":
-    argv = sys.argv
-    args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
+    args = sys.argv[1:]
     if not args:
-        print("Usage: blender --background --python audit.py -- <mesh_file.(obj|fbx|glb)>")
+        print("Usage: python3 audit.py <mesh_file.obj>")
         sys.exit(1)
     stats = audit_mesh(args[0])
     print_audit_report(stats)
