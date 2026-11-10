@@ -1,7 +1,9 @@
 """bpy-based mesh I/O: import FBX/GLB/OBJ, export FBX/GLB/OBJ, per-object stats.
 
-Must run inside Blender's Python (invoked via `blender --background --python
-io_blender.py -- <args>`, or imported by another script run the same way).
+Must run inside Blender's Python: imported by the other core/ scripts, which
+are themselves either imported in-process via the `bpy` pip module (the
+normal pipeline.py path) or run standalone under the real Blender app
+(`blender --background --python <script>.py -- <args>`). Never run directly.
 Reuses the import/export flag conventions already proven in
 tripo_smart_engine's decomposer.py (forward_axis='NEGATIVE_Z', up_axis='Y').
 """

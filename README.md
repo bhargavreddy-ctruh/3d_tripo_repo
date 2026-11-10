@@ -40,6 +40,26 @@ and [`PROGRESS.md`](PROGRESS.md) for the task-by-task build history.
 python3 core/pipeline.py <input.glb|.fbx|.obj> <out_dir>
 ```
 
-Requires Blender (for `bpy`/`bmesh`) and system Python 3 with `trimesh`
-and `libigl` for curvature/decimation. See `core/config.py` for binary
-path resolution.
+Requires the `bpy` pip package (Blender as an in-process Python module —
+`pip install bpy`) plus `trimesh`/`numpy`/`libigl` for curvature/decimation,
+all in the same interpreter that runs `pipeline.py`. `bpy` wheels are only
+published for specific CPython versions (check
+https://pypi.org/project/bpy/#files for the current one — e.g. `bpy==5.2.3`
+needs Python 3.13), so this will likely need its own venv separate from
+whatever Python the rest of the project uses:
+
+```bash
+python3.13 -m venv .venv-bpy
+.venv-bpy/bin/pip install bpy==5.2.3 trimesh numpy libigl
+.venv-bpy/bin/python core/pipeline.py <input.glb|.fbx|.obj> <out_dir>
+```
+
+Pick the `bpy` version that matches the installed Blender.app's version
+(`core/config.py`'s `BLENDER_BIN` prints it) so operators/importers behave
+identically to the desktop app. Previously this pipeline shelled out to a
+separate `blender --background --python ...` subprocess per stage (13+
+full Blender startups for a 10-component asset); it now runs entirely
+in-process — Blender starts once per `pipeline.py` run and is reused for
+every decompose/finalize/join/audit call. A standalone desktop Blender.app
+install is no longer required to run the pipeline, only to cross-check
+`bpy`'s version against (see `core/config.py`).

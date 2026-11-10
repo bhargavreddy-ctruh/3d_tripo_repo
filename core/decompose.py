@@ -3,7 +3,11 @@ its own OBJ — the direct fix for tripo_smart_engine's decomposer.py, which
 joins every part into ONE object before remeshing (the root cause of its
 global target_faces / global micro-feature-median bugs).
 
-Runs under Blender (`blender --background --python decompose.py -- <in> <out_dir>`).
+Runs under Blender: imported in-process via the `bpy` pip module by
+pipeline.py (normal case), or standalone as
+`python3 decompose.py <in> <out_dir>` (also works via
+`blender --background --python decompose.py -- <in> <out_dir>` if a bpy
+module build isn't installed).
 Each component keeps its own curvature field computed independently by
 curvature.py downstream (run on that component's OBJ alone) — this is the
 simplest correct way to make sizing/protection genuinely local without
@@ -75,7 +79,8 @@ if __name__ == "__main__":
     argv = sys.argv
     args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
     if len(args) < 2:
-        print("Usage: blender --background --python decompose.py -- <input_file> <out_dir>")
+        print("Usage: python3 decompose.py <input_file> <out_dir>  "
+              "(or: blender --background --python decompose.py -- <input_file> <out_dir>)")
         sys.exit(1)
 
     manifest, manifest_path = decompose_to_components(args[0], args[1])

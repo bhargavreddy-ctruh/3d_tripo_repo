@@ -1,6 +1,9 @@
 """Per-component finishing: dissolve -> darts -> coplanar_merge -> caps ->
-reproject, all in ONE Blender process (avoids 5x import/export overhead
-per component). Runs under Blender.
+reproject, all in ONE bpy scene (avoids 5x import/export overhead per
+component). Runs under Blender: imported in-process via the `bpy` pip
+module by pipeline.py (one shared process across all components, not one
+process per component), or standalone as
+`python3 finalize_component.py <remeshed.obj> <original_dense.obj> <out.obj>`.
 
 NOTE: a `lattice_straighten` pre-pass (see experimental/lattice_straighten.py) was
 tested here 2026-11-02 and REVERTED -- it helped in isolation on one
@@ -155,7 +158,7 @@ if __name__ == "__main__":
     argv = sys.argv
     args = argv[argv.index("--") + 1:] if "--" in argv else argv[1:]
     if len(args) < 3:
-        print("Usage: blender --background --python finalize_component.py -- <remeshed.obj> <original_dense.obj> <out.obj>")
+        print("Usage: python3 finalize_component.py <remeshed.obj> <original_dense.obj> <out.obj>")
         sys.exit(1)
     try:
         result = finalize(args[0], args[1], args[2])
