@@ -28,6 +28,8 @@ _ENGINE_ROOT = os.path.dirname(_THIS_DIR)
 # quadriflow is the already-proven, stable fallback used successfully in
 # tripo-logic-approach-v2.
 INSTANT_MESHES_CANDIDATES = [
+    os.path.join(_ENGINE_ROOT, "bin", "instant_meshes"),
+    "/Users/bhargavreddy/vacuum_quad_engine/bin/instant_meshes",
     "/Users/bhargavreddy/Downloads/bhargav's one/tools/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "/Applications/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "instant-meshes",
