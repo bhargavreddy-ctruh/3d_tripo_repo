@@ -28,7 +28,8 @@ _ENGINE_ROOT = os.path.dirname(_THIS_DIR)
 # quadriflow is the already-proven, stable fallback used successfully in
 # tripo-logic-approach-v2.
 INSTANT_MESHES_CANDIDATES = [
-    "/Users/bhargavreddy/Downloads/bhargav's one/tools/Instant Meshes.app/Contents/MacOS/Instant Meshes",
+    os.path.join(_ENGINE_ROOT, "bin", "instant_meshes"),   # bundled in the repo (bin/)
+    os.path.join(_ENGINE_ROOT, "bin", "instant-meshes"),
     "/Applications/Instant Meshes.app/Contents/MacOS/Instant Meshes",
     "instant-meshes",
 ]
@@ -64,7 +65,6 @@ DEFAULT_REMESH_BACKEND = "instant_meshes" if INSTANT_MESHES_BIN else "quadriflow
 ASSETS_INPUTS_DIR = os.path.join(_ENGINE_ROOT, "assets", "inputs")
 BENCHMARKS_DIR = os.path.join(_ENGINE_ROOT, "benchmarks")
 REPORTS_DIR = os.path.join(_ENGINE_ROOT, "reports")
-TRIPO_REFERENCE_DIR = "/Users/bhargavreddy/tripo-smart meshes"
 
 # ---------------------------------------------------------------------------
 # Tunables (angles only — scale-independent; no absolute-unit constants here)
