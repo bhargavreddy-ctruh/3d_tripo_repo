@@ -29,8 +29,21 @@ def load_dense_input(path):
     is triangulated regardless (quads=False)."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".obj":
-        vertices, faces = obj_io.load(path)
-        return EditMesh.from_arrays(vertices, faces)
+        loaded = trimesh.load(path, force="mesh", process=True)
+        if isinstance(loaded, trimesh.Scene):
+            geoms = list(loaded.geometry.values())
+            all_verts = []
+            all_faces = []
+            offset = 0
+            for geom in geoms:
+                if not isinstance(geom, trimesh.Trimesh) or len(geom.faces) == 0:
+                    continue
+                all_verts.extend(geom.vertices.tolist())
+                all_faces.extend((f + offset).tolist() for f in geom.faces)
+                offset += len(geom.vertices)
+            return EditMesh.from_arrays(all_verts, all_faces)
+        else:
+            return EditMesh.from_arrays(loaded.vertices.tolist(), loaded.faces.tolist())
     if ext not in (".glb", ".gltf"):
         raise ValueError(
             f"Unsupported input extension: {ext} "

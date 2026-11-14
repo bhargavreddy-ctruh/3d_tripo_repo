@@ -70,7 +70,7 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
     # 1. Strict full-line pairwise quad simplification (preserves 100% quads and edge flow)
     dissolve_stats = None
     try:
-        dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes, max_flat_deg=12.0)
+        dissolve_stats = dissolve.simplify_component(mesh, max_passes=max_passes, max_flat_deg=config.TIER1_FLAT_DEG)
     except Exception as e:
         stage_errors["dissolve"] = str(e)
         mesh = io_mesh.load(remeshed_obj)
@@ -83,17 +83,17 @@ def finalize(remeshed_obj, original_dense_obj, out_obj, max_passes=20):
         stage_errors["darts"] = str(e)
 
     # 3. Pull 3 Coplanar Region Merging: merges planar clusters into minimal clean faces
-    # (eliminates all interior diagonal chords and redundant edges across flat surfaces)
+    # Uses strict 2.5 deg gating to prevent volume shrinkage on curved surfaces
     coplanar_merge_stats = None
     try:
-        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh, angle_tol_deg=10.0)
+        coplanar_merge_stats = coplanar_merge.merge_coplanar_regions(mesh, angle_tol_deg=2.5)
     except Exception as e:
         stage_errors["coplanar_merge"] = str(e)
 
     # 4. Boundary collinear-vertex cleanup: dissolves valence-2 collinear vertices along straight boundaries
     collinear_cleanup_stats = None
     try:
-        n_removed = mesh.dissolve_collinear_verts(list(mesh.verts), angle_tol_deg=10.0)
+        n_removed = mesh.dissolve_collinear_verts(list(mesh.verts), angle_tol_deg=2.5)
         collinear_cleanup_stats = {"verts_removed": n_removed}
     except Exception as e:
         stage_errors["collinear_cleanup"] = str(e)

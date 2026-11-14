@@ -1,3 +1,53 @@
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Output directories & debug intermediate artifacts
 outputs/
+output/
+im_outputs*/
+*_outputs*/
+*__components/
+*__remeshed/
+*__coplanar/
+*__strict_coplanar/
+*__finalized/
+
+# 3D assets & test models (keep repo code & docs only)
+assets/
+*.obj
+*.glb
+*.gltf
+*.ply
+*.stl
+*.off
+*.fbx
+*.zip
+*.tar
+*.tar.gz
+
+# Image renders
+*.png
+*.jpg
+*.jpeg
+
+# Temporary backups & logs
+*.bak
+*.x86_bak
+*.log
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
